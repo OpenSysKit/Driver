@@ -2,6 +2,14 @@
 
 #include <ntddk.h>
 
+// 内核模式下未定义的进程访问权限常量
+#ifndef PROCESS_TERMINATE
+#define PROCESS_TERMINATE           0x0001
+#endif
+#ifndef PROCESS_SUSPEND_RESUME
+#define PROCESS_SUSPEND_RESUME      0x0800
+#endif
+
 // ========== 设备名 ==========
 
 #define DEVICE_NAME    L"\\Device\\OpenSysKit"

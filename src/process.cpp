@@ -51,7 +51,7 @@ NTSTATUS ProcessEnumerate(PVOID OutputBuffer, ULONG OutputBufferSize, PULONG Byt
     }
 
     bufferSize += 4096; // 预留余量
-    PVOID buffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, bufferSize, 'ksyS');
+    PVOID buffer = ExAllocatePoolWithTag(NonPagedPool, bufferSize, 'ksyS');
     if (!buffer) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
