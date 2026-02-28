@@ -44,19 +44,9 @@ static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         break;
 
     case IOCTL_FREEZE_PROCESS:
-        if (inLen < sizeof(PROCESS_REQUEST)) {
-            status = STATUS_BUFFER_TOO_SMALL;
-            break;
-        }
-        status = ProcessFreeze(((PPROCESS_REQUEST)inBuf)->ProcessId);
-        break;
-
     case IOCTL_UNFREEZE_PROCESS:
-        if (inLen < sizeof(PROCESS_REQUEST)) {
-            status = STATUS_BUFFER_TOO_SMALL;
-            break;
-        }
-        status = ProcessUnfreeze(((PPROCESS_REQUEST)inBuf)->ProcessId);
+        // 冻结/解冻由用户模式后端实现，驱动不处理
+        status = STATUS_NOT_SUPPORTED;
         break;
 
     case IOCTL_PROTECT_PROCESS: {

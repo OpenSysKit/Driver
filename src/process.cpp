@@ -33,10 +33,6 @@ typedef struct _SYSTEM_PROCESS_INFORMATION_ENTRY {
     // 后续字段省略
 } SYSTEM_PROCESS_INFORMATION_ENTRY, *PSYSTEM_PROCESS_INFORMATION_ENTRY;
 
-// NtSuspendProcess / NtResumeProcess 未文档化
-extern "C" NTSTATUS NTAPI NtSuspendProcess(HANDLE ProcessHandle);
-extern "C" NTSTATUS NTAPI NtResumeProcess(HANDLE ProcessHandle);
-
 // ========== 进程枚举 ==========
 
 NTSTATUS ProcessEnumerate(PVOID OutputBuffer, ULONG OutputBufferSize, PULONG BytesWritten)
@@ -143,44 +139,6 @@ NTSTATUS ProcessKill(ULONG ProcessId)
     }
 
     status = ZwTerminateProcess(hProcess, STATUS_SUCCESS);
-    ZwClose(hProcess);
-    return status;
-}
-
-// ========== 冻结 ==========
-
-NTSTATUS ProcessFreeze(ULONG ProcessId)
-{
-    if (ProcessId == 0 || ProcessId == 4) {
-        return STATUS_ACCESS_DENIED;
-    }
-
-    HANDLE hProcess = NULL;
-    NTSTATUS status = OpenProcessById(ProcessId, &hProcess, PROCESS_SUSPEND_RESUME);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    status = NtSuspendProcess(hProcess);
-    ZwClose(hProcess);
-    return status;
-}
-
-// ========== 解冻 ==========
-
-NTSTATUS ProcessUnfreeze(ULONG ProcessId)
-{
-    if (ProcessId == 0 || ProcessId == 4) {
-        return STATUS_ACCESS_DENIED;
-    }
-
-    HANDLE hProcess = NULL;
-    NTSTATUS status = OpenProcessById(ProcessId, &hProcess, PROCESS_SUSPEND_RESUME);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    status = NtResumeProcess(hProcess);
     ZwClose(hProcess);
     return status;
 }
