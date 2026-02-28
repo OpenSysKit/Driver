@@ -113,12 +113,6 @@ static void DriverUnload(PDRIVER_OBJECT DriverObject)
 
     UnregisterProtectCallbacks();
 
-    // ObUnRegisterCallbacks 不保证其他 CPU 上正在执行的回调已完成，
-    // 等待一段时间确保所有并发回调退出，防止映像内存释放后 use-after-free
-    LARGE_INTEGER delay;
-    delay.QuadPart = -10 * 1000 * 200; // 200ms (负值 = 相对时间, 单位 100ns)
-    KeDelayExecutionThread(KernelMode, FALSE, &delay);
-
     UNICODE_STRING symLink;
     RtlInitUnicodeString(&symLink, SYMLINK_NAME);
     IoDeleteSymbolicLink(&symLink);
