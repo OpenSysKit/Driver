@@ -24,14 +24,9 @@ jobs:
       matrix:
         arch: [x64, ARM64]
       fail-fast: false
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-
-      - name: 安装 WDK
-        uses: GuillaumeFalourd/setup-windows10-sdk-action@v2.2
-        with:
-          sdk-version: 26100
 
       - name: 配置 CMake
         run: cmake -B build -G "Visual Studio 17 2022" -A ${{ matrix.arch }}
