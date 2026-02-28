@@ -13,7 +13,7 @@
 // ========== 设备名 ==========
 
 #define DEVICE_NAME    L"\\Device\\OpenSysKit"
-#define SYMLINK_NAME   L"\\DosDevices\\OpenSysKit"
+#define SYMLINK_NAME   L"\\??\\OpenSysKit"
 
 // ========== IOCTL 控制码 ==========
 // 自定义设备类型，避免与系统冲突

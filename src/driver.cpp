@@ -109,15 +109,18 @@ static void DriverUnload(PDRIVER_OBJECT DriverObject)
 {
     UNREFERENCED_PARAMETER(DriverObject);
 
+    DbgPrint("[OpenSysKit] >>> DRIVER UNLOADING <<<\n");
+
     UnregisterProtectCallbacks();
 
     // ObUnRegisterCallbacks 不保证其他 CPU 上正在执行的回调已完成，
     // 等待一段时间确保所有并发回调退出，防止映像内存释放后 use-after-free
     LARGE_INTEGER delay;
-    delay.QuadPart = -10 * 1000 * 100; // 100ms (负值 = 相对时间, 单位 100ns)
+    delay.QuadPart = -10 * 1000 * 200; // 200ms (负值 = 相对时间, 单位 100ns)
     KeDelayExecutionThread(KernelMode, FALSE, &delay);
 
-    UNICODE_STRING symLink = RTL_CONSTANT_STRING(SYMLINK_NAME);
+    UNICODE_STRING symLink;
+    RtlInitUnicodeString(&symLink, SYMLINK_NAME);
     IoDeleteSymbolicLink(&symLink);
 
     if (g_DriverContext.DeviceObject) {
@@ -125,17 +128,28 @@ static void DriverUnload(PDRIVER_OBJECT DriverObject)
         g_DriverContext.DeviceObject = NULL;
     }
 
-    DbgPrint("[OpenSysKit] 驱动已卸载\n");
+    DbgPrint("[OpenSysKit] 驱动已卸载，清理完成\n");
 }
 
 extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 {
     UNREFERENCED_PARAMETER(RegistryPath);
 
-    DbgPrint("[OpenSysKit] 驱动正在加载...\n");
+    DbgPrint("[OpenSysKit] ============================================\n");
+    DbgPrint("[OpenSysKit] >>>    OPENSYSKIT DRIVER LOADING!       <<<\n");
+    DbgPrint("[OpenSysKit] ============================================\n");
+    DbgPrint("[OpenSysKit] DriverObject: %p\n", DriverObject);
 
-    UNICODE_STRING deviceName = RTL_CONSTANT_STRING(DEVICE_NAME);
-    UNICODE_STRING symLink = RTL_CONSTANT_STRING(SYMLINK_NAME);
+    if (!DriverObject) {
+        DbgPrint("[OpenSysKit] ERROR: DriverObject is NULL!\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    UNICODE_STRING deviceName;
+    UNICODE_STRING symLink;
+
+    RtlInitUnicodeString(&deviceName, DEVICE_NAME);
+    RtlInitUnicodeString(&symLink, SYMLINK_NAME);
 
     // 手动映射场景下，前一次卸载可能未完全清理符号链接，先尝试删除残留
     IoDeleteSymbolicLink(&symLink);
@@ -150,23 +164,27 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
         &g_DriverContext.DeviceObject
     );
     if (!NT_SUCCESS(status)) {
-        DbgPrint("[OpenSysKit] 创建设备失败: 0x%X\n", status);
+        DbgPrint("[OpenSysKit] 创建设备失败! Status: 0x%X\n", status);
         return status;
     }
 
+    DbgPrint("[OpenSysKit] 设备创建成功: %ws\n", DEVICE_NAME);
+
     status = IoCreateSymbolicLink(&symLink, &deviceName);
     if (!NT_SUCCESS(status)) {
-        DbgPrint("[OpenSysKit] 创建符号链接失败: 0x%X\n", status);
+        DbgPrint("[OpenSysKit] 创建符号链接失败! Status: 0x%X\n", status);
         IoDeleteDevice(g_DriverContext.DeviceObject);
         return status;
     }
+
+    DbgPrint("[OpenSysKit] 符号链接创建成功: %ws\n", SYMLINK_NAME);
 
     DriverObject->MajorFunction[IRP_MJ_CREATE] = DispatchCreateClose;
     DriverObject->MajorFunction[IRP_MJ_CLOSE] = DispatchCreateClose;
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DispatchDeviceControl;
     DriverObject->DriverUnload = DriverUnload;
 
-    // 手动映射场景下 I/O Manager 不会自动清除此标志，必须显式清除才能接受 CreateFile 请求
+    // 清除 DO_DEVICE_INITIALIZING 标志 (TestDriver 中有此关键操作)
     g_DriverContext.DeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
 
     KeInitializeSpinLock(&g_DriverContext.ProtectLock);
@@ -177,6 +195,8 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
         // 不阻止加载，保护功能降级
     }
 
-    DbgPrint("[OpenSysKit] 驱动加载成功\n");
+    DbgPrint("[OpenSysKit] ============================================\n");
+    DbgPrint("[OpenSysKit] >>>    DRIVER LOADED SUCCESSFULLY!      <<<\n");
+    DbgPrint("[OpenSysKit] ============================================\n");
     return STATUS_SUCCESS;
 }
