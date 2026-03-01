@@ -12,3 +12,4 @@ wdk_add_driver(OpenSysKit
 
 target_include_directories(OpenSysKit PRIVATE src)
 target_compile_options(OpenSysKit PRIVATE /utf-8)
+target_link_options(OpenSysKit PRIVATE /INTEGRITYCHECK)

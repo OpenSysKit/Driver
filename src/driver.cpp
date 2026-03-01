@@ -3,10 +3,6 @@
 
 DRIVER_CONTEXT g_DriverContext = { 0 };
 
-// callbacks.cpp
-extern NTSTATUS RegisterProtectCallbacks();
-extern void UnregisterProtectCallbacks();
-
 static NTSTATUS DispatchCreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     UNREFERENCED_PARAMETER(DeviceObject);
@@ -49,51 +45,6 @@ static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         status = STATUS_NOT_SUPPORTED;
         break;
 
-    case IOCTL_PROTECT_PROCESS: {
-        if (inLen < sizeof(PROCESS_REQUEST)) {
-            status = STATUS_BUFFER_TOO_SMALL;
-            break;
-        }
-        ULONG pid = ((PPROCESS_REQUEST)inBuf)->ProcessId;
-        KIRQL oldIrql;
-        KeAcquireSpinLock(&g_DriverContext.ProtectLock, &oldIrql);
-        if (g_DriverContext.ProtectedPidCount >= MAX_PROTECTED_PIDS) {
-            status = STATUS_INSUFFICIENT_RESOURCES;
-        } else {
-            BOOLEAN found = FALSE;
-            for (ULONG i = 0; i < g_DriverContext.ProtectedPidCount; i++) {
-                if (g_DriverContext.ProtectedPids[i] == pid) {
-                    found = TRUE;
-                    break;
-                }
-            }
-            if (!found) {
-                g_DriverContext.ProtectedPids[g_DriverContext.ProtectedPidCount++] = pid;
-            }
-        }
-        KeReleaseSpinLock(&g_DriverContext.ProtectLock, oldIrql);
-        break;
-    }
-
-    case IOCTL_UNPROTECT_PROCESS: {
-        if (inLen < sizeof(PROCESS_REQUEST)) {
-            status = STATUS_BUFFER_TOO_SMALL;
-            break;
-        }
-        ULONG pid = ((PPROCESS_REQUEST)inBuf)->ProcessId;
-        KIRQL oldIrql;
-        KeAcquireSpinLock(&g_DriverContext.ProtectLock, &oldIrql);
-        for (ULONG i = 0; i < g_DriverContext.ProtectedPidCount; i++) {
-            if (g_DriverContext.ProtectedPids[i] == pid) {
-                g_DriverContext.ProtectedPids[i] = g_DriverContext.ProtectedPids[g_DriverContext.ProtectedPidCount - 1];
-                g_DriverContext.ProtectedPidCount--;
-                break;
-            }
-        }
-        KeReleaseSpinLock(&g_DriverContext.ProtectLock, oldIrql);
-        break;
-    }
-
     default:
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
@@ -110,8 +61,6 @@ static void DriverUnload(PDRIVER_OBJECT DriverObject)
     UNREFERENCED_PARAMETER(DriverObject);
 
     DbgPrint("[OpenSysKit] >>> DRIVER UNLOADING <<<\n");
-
-    UnregisterProtectCallbacks();
 
     UNICODE_STRING symLink;
     RtlInitUnicodeString(&symLink, SYMLINK_NAME);
@@ -180,14 +129,6 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
 
     // 清除 DO_DEVICE_INITIALIZING 标志 (TestDriver 中有此关键操作)
     g_DriverContext.DeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
-
-    KeInitializeSpinLock(&g_DriverContext.ProtectLock);
-
-    status = RegisterProtectCallbacks();
-    if (!NT_SUCCESS(status)) {
-        DbgPrint("[OpenSysKit] 注册保护回调失败: 0x%X (保护功能不可用)\n", status);
-        // 不阻止加载，保护功能降级
-    }
 
     DbgPrint("[OpenSysKit] ============================================\n");
     DbgPrint("[OpenSysKit] >>>    DRIVER LOADED SUCCESSFULLY!      <<<\n");
