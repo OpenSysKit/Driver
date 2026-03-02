@@ -8,7 +8,20 @@ extern "C" NTSTATUS NTAPI ZwQuerySystemInformation(
     PULONG ReturnLength
 );
 
+extern "C" NTSTATUS NTAPI ZwQueryInformationProcess(
+    HANDLE ProcessHandle,
+    ULONG ProcessInformationClass,
+    PVOID ProcessInformation,
+    ULONG ProcessInformationLength,
+    PULONG ReturnLength
+);
+
 #define SystemProcessInformation 5
+#define ProcessBreakOnTermination 29
+
+#ifndef PROCESS_QUERY_LIMITED_INFORMATION
+#define PROCESS_QUERY_LIMITED_INFORMATION 0x1000
+#endif
 
 // 系统进程信息结构（部分字段）
 typedef struct _SYSTEM_PROCESS_INFORMATION_ENTRY {
@@ -133,9 +146,31 @@ NTSTATUS ProcessKill(ULONG ProcessId)
     }
 
     HANDLE hProcess = NULL;
-    NTSTATUS status = OpenProcessById(ProcessId, &hProcess, PROCESS_TERMINATE);
+    NTSTATUS status = OpenProcessById(
+        ProcessId,
+        &hProcess,
+        PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION
+    );
     if (!NT_SUCCESS(status)) {
         return status;
+    }
+
+    ULONG breakOnTermination = 0;
+    status = ZwQueryInformationProcess(
+        hProcess,
+        ProcessBreakOnTermination,
+        &breakOnTermination,
+        sizeof(breakOnTermination),
+        NULL
+    );
+    if (!NT_SUCCESS(status)) {
+        ZwClose(hProcess);
+        return status;
+    }
+
+    if (breakOnTermination != 0) {
+        ZwClose(hProcess);
+        return STATUS_ACCESS_DENIED;
     }
 
     status = ZwTerminateProcess(hProcess, STATUS_SUCCESS);
