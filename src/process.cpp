@@ -1,4 +1,5 @@
 #include "process.h"
+#include <ntstrsafe.h>
 
 // ZwQuerySystemInformation 未在公开头文件中声明
 extern "C" NTSTATUS NTAPI ZwQuerySystemInformation(
@@ -140,5 +141,66 @@ NTSTATUS ProcessKill(ULONG ProcessId)
 
     status = ZwTerminateProcess(hProcess, STATUS_SUCCESS);
     ZwClose(hProcess);
+    return status;
+}
+
+NTSTATUS FileDeleteKernel(PCWSTR Path)
+{
+    if (!Path || Path[0] == L'\0') {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    WCHAR normalizedPath[600] = { 0 };
+    NTSTATUS status;
+
+    if (Path[0] == L'\\') {
+        status = RtlStringCchCopyW(normalizedPath, RTL_NUMBER_OF(normalizedPath), Path);
+    }
+    else {
+        status = RtlStringCchPrintfW(normalizedPath, RTL_NUMBER_OF(normalizedPath), L"\\??\\%ws", Path);
+    }
+
+    if (!NT_SUCCESS(status)) {
+        return STATUS_NAME_TOO_LONG;
+    }
+
+    UNICODE_STRING ntPath;
+    RtlInitUnicodeString(&ntPath, normalizedPath);
+
+    OBJECT_ATTRIBUTES objAttr;
+    InitializeObjectAttributes(&objAttr, &ntPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    IO_STATUS_BLOCK iosb = { 0 };
+    HANDLE hFile = NULL;
+
+    status = ZwCreateFile(
+        &hFile,
+        DELETE | SYNCHRONIZE,
+        &objAttr,
+        &iosb,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+        NULL,
+        0
+    );
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    FILE_DISPOSITION_INFORMATION disposition = { 0 };
+    disposition.DeleteFile = TRUE;
+
+    status = ZwSetInformationFile(
+        hFile,
+        &iosb,
+        &disposition,
+        sizeof(disposition),
+        FileDispositionInformation
+    );
+
+    ZwClose(hFile);
     return status;
 }

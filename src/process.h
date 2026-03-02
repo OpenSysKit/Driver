@@ -7,3 +7,6 @@ NTSTATUS ProcessEnumerate(PVOID OutputBuffer, ULONG OutputBufferSize, PULONG Byt
 
 // 内核级终止
 NTSTATUS ProcessKill(ULONG ProcessId);
+
+// 内核级删除文件
+NTSTATUS FileDeleteKernel(PCWSTR Path);

@@ -45,6 +45,17 @@ static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         status = STATUS_NOT_SUPPORTED;
         break;
 
+    case IOCTL_DELETE_FILE:
+        if (inLen < sizeof(FILE_PATH_REQUEST)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        // 固定长度缓冲区，强制补终止符，避免跨界读取。
+        ((PFILE_PATH_REQUEST)inBuf)->Path[RTL_NUMBER_OF(((PFILE_PATH_REQUEST)inBuf)->Path) - 1] = L'\0';
+        status = FileDeleteKernel(((PFILE_PATH_REQUEST)inBuf)->Path);
+        break;
+
     default:
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
