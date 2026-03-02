@@ -1,5 +1,4 @@
 #include "process.h"
-#include <ntstrsafe.h>
 
 // ZwQuerySystemInformation 未在公开头文件中声明
 extern "C" NTSTATUS NTAPI ZwQuerySystemInformation(
@@ -150,22 +149,13 @@ NTSTATUS FileDeleteKernel(PCWSTR Path)
         return STATUS_INVALID_PARAMETER;
     }
 
-    WCHAR normalizedPath[600] = { 0 };
-    NTSTATUS status;
-
-    if (Path[0] == L'\\') {
-        status = RtlStringCchCopyW(normalizedPath, RTL_NUMBER_OF(normalizedPath), Path);
-    }
-    else {
-        status = RtlStringCchPrintfW(normalizedPath, RTL_NUMBER_OF(normalizedPath), L"\\??\\%ws", Path);
-    }
-
-    if (!NT_SUCCESS(status)) {
-        return STATUS_NAME_TOO_LONG;
+    // 约定由用户态传入 NT 路径（例如 \\??\\C:\\a\\b.txt 或 \\Device\\...）。
+    if (Path[0] != L'\\') {
+        return STATUS_INVALID_PARAMETER;
     }
 
     UNICODE_STRING ntPath;
-    RtlInitUnicodeString(&ntPath, normalizedPath);
+    RtlInitUnicodeString(&ntPath, Path);
 
     OBJECT_ATTRIBUTES objAttr;
     InitializeObjectAttributes(&objAttr, &ntPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
@@ -173,7 +163,7 @@ NTSTATUS FileDeleteKernel(PCWSTR Path)
     IO_STATUS_BLOCK iosb = { 0 };
     HANDLE hFile = NULL;
 
-    status = ZwCreateFile(
+    NTSTATUS status = ZwCreateFile(
         &hFile,
         DELETE | SYNCHRONIZE,
         &objAttr,
