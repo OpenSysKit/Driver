@@ -46,6 +46,18 @@ static BOOLEAN IsKernelAddress(PVOID addr)
     return (ULONG_PTR)addr > (ULONG_PTR)0xFFFF000000000000ULL;
 }
 
+static VOID FillProcessKillResult(
+    _Out_ PPROCESS_KILL_RESULT Result,
+    _In_ ULONG Method,
+    _In_ NTSTATUS OperationStatus
+)
+{
+    Result->Version = PROCESS_KILL_RESULT_VERSION;
+    Result->OperationStatus = (ULONG)OperationStatus;
+    Result->Method = Method;
+    Result->Reserved = 0;
+}
+
 //
 // 从函数 stub 中扫描 E8/E9 相对跳转，提取目标地址。
 //
@@ -247,10 +259,17 @@ static NTSTATUS OpenProcessById(ULONG ProcessId, PHANDLE ProcessHandle, ACCESS_M
 
 // ========== 内核级终止 ==========
 
-NTSTATUS ProcessKill(ULONG ProcessId)
+NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
 {
+    if (!Result) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    FillProcessKillResult(Result, PROCESS_KILL_METHOD_NONE, STATUS_UNSUCCESSFUL);
+
     if (ProcessId == 0 || ProcessId == 4) {
-        return STATUS_ACCESS_DENIED;
+        FillProcessKillResult(Result, PROCESS_KILL_METHOD_NONE, STATUS_ACCESS_DENIED);
+        return STATUS_SUCCESS;
     }
 
     // --- 路径 1：PspTerminateProcess（直接传 PEPROCESS，绕过句柄层）---
@@ -270,7 +289,8 @@ NTSTATUS ProcessKill(ULONG ProcessId)
 
                 if (NT_SUCCESS(queryStatus) && breakOnTermination != 0) {
                     ObDereferenceObject(process);
-                    return STATUS_ACCESS_DENIED;
+                    FillProcessKillResult(Result, PROCESS_KILL_METHOD_NONE, STATUS_ACCESS_DENIED);
+                    return STATUS_SUCCESS;
                 }
             }
 
@@ -278,6 +298,7 @@ NTSTATUS ProcessKill(ULONG ProcessId)
             ObDereferenceObject(process);
 
             if (NT_SUCCESS(status)) {
+                FillProcessKillResult(Result, PROCESS_KILL_METHOD_PSP, STATUS_SUCCESS);
                 DbgPrint("[OpenSysKit] ProcessKill PID=%lu via PspTerminateProcess OK\n", ProcessId);
                 return STATUS_SUCCESS;
             }
@@ -292,7 +313,8 @@ NTSTATUS ProcessKill(ULONG ProcessId)
         PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION
     );
     if (!NT_SUCCESS(status)) {
-        return status;
+        FillProcessKillResult(Result, PROCESS_KILL_METHOD_ZW, status);
+        return STATUS_SUCCESS;
     }
 
     ULONG breakOnTermination = 0;
@@ -302,17 +324,20 @@ NTSTATUS ProcessKill(ULONG ProcessId)
     );
     if (!NT_SUCCESS(status)) {
         ZwClose(hProcess);
-        return status;
+        FillProcessKillResult(Result, PROCESS_KILL_METHOD_ZW, status);
+        return STATUS_SUCCESS;
     }
     if (breakOnTermination != 0) {
         ZwClose(hProcess);
-        return STATUS_ACCESS_DENIED;
+        FillProcessKillResult(Result, PROCESS_KILL_METHOD_ZW, STATUS_ACCESS_DENIED);
+        return STATUS_SUCCESS;
     }
 
     status = ZwTerminateProcess(hProcess, STATUS_SUCCESS);
     DbgPrint("[OpenSysKit] ProcessKill PID=%lu via ZwTerminateProcess: 0x%08X\n", ProcessId, status);
     ZwClose(hProcess);
-    return status;
+    FillProcessKillResult(Result, PROCESS_KILL_METHOD_ZW, status);
+    return STATUS_SUCCESS;
 }
 
 // ========== 文件删除 ==========

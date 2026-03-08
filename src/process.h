@@ -9,7 +9,7 @@ VOID ResolvePspTerminateProcess();
 NTSTATUS ProcessEnumerate(PVOID OutputBuffer, ULONG OutputBufferSize, PULONG BytesWritten);
 
 // 内核级终止（优先 PspTerminateProcess，回退 ZwTerminateProcess）
-NTSTATUS ProcessKill(ULONG ProcessId);
+NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result);
 
 // 内核级删除文件
 NTSTATUS FileDeleteKernel(PCWSTR Path);

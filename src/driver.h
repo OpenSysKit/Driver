@@ -37,9 +37,21 @@
 
 // ========== 通信数据结构 ==========
 
+#define PROCESS_KILL_RESULT_VERSION 1
+#define PROCESS_KILL_METHOD_NONE    0
+#define PROCESS_KILL_METHOD_PSP     1
+#define PROCESS_KILL_METHOD_ZW      2
+
 typedef struct _PROCESS_REQUEST {
     ULONG ProcessId;
 } PROCESS_REQUEST, *PPROCESS_REQUEST;
+
+typedef struct _PROCESS_KILL_RESULT {
+    ULONG Version;
+    ULONG OperationStatus;
+    ULONG Method;
+    ULONG Reserved;
+} PROCESS_KILL_RESULT, *PPROCESS_KILL_RESULT;
 
 typedef struct _PROCESS_INFO {
     ULONG  ProcessId;

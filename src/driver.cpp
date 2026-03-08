@@ -37,7 +37,24 @@ static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             status = STATUS_BUFFER_TOO_SMALL;
             break;
         }
-        status = ProcessKill(((PPROCESS_REQUEST)inBuf)->ProcessId);
+        {
+            PROCESS_KILL_RESULT killResult = { 0 };
+            PPROCESS_KILL_RESULT killResultPtr =
+                (outLen >= sizeof(PROCESS_KILL_RESULT))
+                ? (PPROCESS_KILL_RESULT)outBuf
+                : &killResult;
+
+            status = ProcessKill(((PPROCESS_REQUEST)inBuf)->ProcessId, killResultPtr);
+            if (!NT_SUCCESS(status)) {
+                break;
+            }
+
+            if (outLen >= sizeof(PROCESS_KILL_RESULT)) {
+                bytesWritten = sizeof(PROCESS_KILL_RESULT);
+            } else {
+                status = (NTSTATUS)killResultPtr->OperationStatus;
+            }
+        }
         break;
 
     case IOCTL_FREEZE_PROCESS:
