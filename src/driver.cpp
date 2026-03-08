@@ -1,5 +1,6 @@
 #include "driver.h"
 #include "process.h"
+#include "protect.h"
 
 DRIVER_CONTEXT g_DriverContext = { 0 };
 
@@ -18,9 +19,9 @@ static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
     PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
     ULONG ioctl = irpSp->Parameters.DeviceIoControl.IoControlCode;
-    PVOID inBuf = Irp->AssociatedIrp.SystemBuffer;
+    PVOID inBuf  = Irp->AssociatedIrp.SystemBuffer;
     PVOID outBuf = Irp->AssociatedIrp.SystemBuffer;
-    ULONG inLen = irpSp->Parameters.DeviceIoControl.InputBufferLength;
+    ULONG inLen  = irpSp->Parameters.DeviceIoControl.InputBufferLength;
     ULONG outLen = irpSp->Parameters.DeviceIoControl.OutputBufferLength;
 
     NTSTATUS status = STATUS_SUCCESS;
@@ -41,7 +42,6 @@ static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
     case IOCTL_FREEZE_PROCESS:
     case IOCTL_UNFREEZE_PROCESS:
-        // 冻结/解冻由用户模式后端实现，驱动不处理
         status = STATUS_NOT_SUPPORTED;
         break;
 
@@ -50,10 +50,24 @@ static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             status = STATUS_BUFFER_TOO_SMALL;
             break;
         }
-
-        // 固定长度缓冲区，强制补终止符，避免跨界读取。
         ((PFILE_PATH_REQUEST)inBuf)->Path[RTL_NUMBER_OF(((PFILE_PATH_REQUEST)inBuf)->Path) - 1] = L'\0';
         status = FileDeleteKernel(((PFILE_PATH_REQUEST)inBuf)->Path);
+        break;
+
+    case IOCTL_PROTECT_PROCESS:
+        if (inLen < sizeof(PROCESS_REQUEST)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        status = ProcessProtect(((PPROCESS_REQUEST)inBuf)->ProcessId);
+        break;
+
+    case IOCTL_UNPROTECT_PROCESS:
+        if (inLen < sizeof(PROCESS_REQUEST)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        status = ProcessUnprotect(((PPROCESS_REQUEST)inBuf)->ProcessId);
         break;
 
     default:
@@ -72,6 +86,8 @@ static void DriverUnload(PDRIVER_OBJECT DriverObject)
     UNREFERENCED_PARAMETER(DriverObject);
 
     DbgPrint("[OpenSysKit] >>> DRIVER UNLOADING <<<\n");
+
+    // CleanupProtect();
 
     UNICODE_STRING symLink;
     RtlInitUnicodeString(&symLink, SYMLINK_NAME);
@@ -105,7 +121,6 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
     RtlInitUnicodeString(&deviceName, DEVICE_NAME);
     RtlInitUnicodeString(&symLink, SYMLINK_NAME);
 
-    // 手动映射场景下，前一次卸载可能未完全清理符号链接，先尝试删除残留
     IoDeleteSymbolicLink(&symLink);
 
     NTSTATUS status = IoCreateDevice(
@@ -133,13 +148,20 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
 
     DbgPrint("[OpenSysKit] 符号链接创建成功: %ws\n", SYMLINK_NAME);
 
-    DriverObject->MajorFunction[IRP_MJ_CREATE] = DispatchCreateClose;
-    DriverObject->MajorFunction[IRP_MJ_CLOSE] = DispatchCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_CREATE]         = DispatchCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE]          = DispatchCreateClose;
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DispatchDeviceControl;
-    DriverObject->DriverUnload = DriverUnload;
+    DriverObject->DriverUnload                          = DriverUnload;
 
-    // 清除 DO_DEVICE_INITIALIZING 标志 (TestDriver 中有此关键操作)
     g_DriverContext.DeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+
+    ResolvePspTerminateProcess();
+    
+    status = InitProtect();
+    if (!NT_SUCCESS(status)) {
+        DbgPrint("[OpenSysKit] InitProtect 失败 (0x%X)，保护功能不可用\n", status);
+        // 非致命，继续加载
+    }
 
     DbgPrint("[OpenSysKit] ============================================\n");
     DbgPrint("[OpenSysKit] >>>    DRIVER LOADED SUCCESSFULLY!      <<<\n");
