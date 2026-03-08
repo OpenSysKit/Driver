@@ -1,3 +1,4 @@
+#include <ntifs.h>  // PsLookupProcessByProcessId 在这里声明
 #include "driver.h"
 
 // ========== PPL 相关定义 ==========
