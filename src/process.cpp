@@ -48,10 +48,10 @@ static PROCESS_DIRECT_KILL_SOURCE g_ProcessDirectKillSource = ProcessDirectKillS
 static PCSTR ProcessDirectKillSourceName(_In_ PROCESS_DIRECT_KILL_SOURCE Source)
 {
     switch (Source) {
-    case ProcessDirectKillSourcePsExport:          return "PsTerminateProcess export";
-    case ProcessDirectKillSourcePsResolvedTarget:  return "PsTerminateProcess resolved target";
-    case ProcessDirectKillSourceZwResolvedTarget:  return "ZwTerminateProcess resolved target";
-    default:                                       return "unresolved";
+    case ProcessDirectKillSourcePsExport:         return "PsTerminateProcess export";
+    case ProcessDirectKillSourcePsResolvedTarget: return "PsTerminateProcess resolved target";
+    case ProcessDirectKillSourceZwResolvedTarget: return "ZwTerminateProcess resolved target";
+    default:                                      return "unresolved";
     }
 }
 
@@ -129,17 +129,35 @@ static VOID FillProcessKillResult(
 }
 
 //
-// 从 stub 中找第一个控制转移指令（call/jmp），用于跟进 syscall stub -> 实现体。
+// 验证一个函数指针是否指向合理的可执行内核代码。
+// 检查：地址在内核空间 + 第一字节不是 int3/nop/零。
+//
+static BOOLEAN ValidateFunctionPointer(_In_ PVOID ptr)
+{
+    if (!ptr || !IsKernelAddress(ptr)) return FALSE;
+
+    UCHAR firstByte = 0;
+    __try {
+        firstByte = *(PUCHAR)ptr;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return FALSE;
+    }
+
+    if (firstByte == 0xCC || firstByte == 0x90 || firstByte == 0x00) return FALSE;
+    return TRUE;
+}
+
+//
+// 从 stub 中找第一个控制转移指令，用于跟进 syscall stub -> 实现体。
 //
 static PVOID ScanStubTransfer(_In_ PVOID FuncBase, _In_ ULONG MaxScan, _In_opt_ PCSTR Tag)
 {
     if (!FuncBase) return nullptr;
-
     PUCHAR p = (PUCHAR)FuncBase;
 
     for (ULONG i = 0; i < MaxScan; ++i) {
         UCHAR op = p[i];
-
         if (op == 0xC3 || op == 0xC2) break;
 
         if (op == 0xE8 || op == 0xE9) {
@@ -216,14 +234,25 @@ static PFN_PSP_TERMINATE_PROCESS ResolveViaPsTerminateProcess()
 
 // ---------- 策略 2：ZwTerminateProcess 调用链扫描 ----------
 //
-// 关键修复：遇到 ret 不再 break，继续扫描整个函数体，
-// 收集所有 E8 call 候选，最终取最后一个（最深层调用，
-// 通常就是 PspTerminateProcess）。
-// bodyScanLimit 加大到 1024 覆盖完整函数体。
+// NtTerminateProcess 结构大致如下：
+//   [参数校验/权限检查，无 call]
+//   ret                          <- 第一个 ret（快速失败路径）
+//   ...
+//   call PspTerminateProcess     <- 我们要找的目标
+//   [线程终止循环：大量连续 call，目标地址等差递增]
+//   ...
+//
+// 策略：
+//   1. 跳过第一个 ret 之前（无 call）
+//   2. 收集 ret 之后的 call，但跳过"等差 call 簇"
+//      （连续多个 call 目标地址差值固定，判定为线程循环）
+//   3. 取等差簇之前的最后一个孤立 call 作为 PspTerminateProcess
 //
 static PFN_PSP_TERMINATE_PROCESS ResolveViaZwTerminateProcess()
 {
     const ULONG bodyScanLimit = 1024;
+    // 连续几个 call 目标地址差值相同就认定为等差簇
+    const ULONG clusterThreshold = 3;
 
     UNICODE_STRING name;
     RtlInitUnicodeString(&name, L"ZwTerminateProcess");
@@ -245,80 +274,89 @@ static PFN_PSP_TERMINATE_PROCESS ResolveViaZwTerminateProcess()
         LogStubBytes("Resolve#2.body", body, 16);
     }
 
-    PVOID lastCallCandidate = nullptr;
-    PVOID lastJmpCandidate  = nullptr;
+    // 第一阶段：收集所有 call 目标（带偏移），跳过第一个 ret 之前的部分
+    const ULONG maxCalls = 128;
+    ULONG_PTR callTargets[maxCalls] = {};
+    ULONG callOffsets[maxCalls]     = {};
+    ULONG callCount = 0;
+    BOOLEAN passedFirstRet = FALSE;
 
-    for (ULONG i = 0; i < bodyScanLimit; ++i) {
+    for (ULONG i = 0; i < bodyScanLimit && callCount < maxCalls; ++i) {
         UCHAR op = p[i];
 
-        // ret: 不 break，继续扫描（函数内可能有多个 ret 分支）
         if (op == 0xC3 || op == 0xC2) {
-            DbgPrint("[OpenSysKit] [Resolve#2.scan] ret @+0x%03lX, continuing\n", i);
+            if (!passedFirstRet) {
+                DbgPrint("[OpenSysKit] [Resolve#2.scan] first ret @+0x%03lX\n", i);
+                passedFirstRet = TRUE;
+            }
             continue;
         }
 
-        if (op == 0xE8 || op == 0xE9) {
+        // 只收集越过第一个 ret 之后的 call
+        if (!passedFirstRet) continue;
+
+        if (op == 0xE8) {
             if (i + 4 >= bodyScanLimit) break;
             LONG rel = 0;
             if (!ReadLongSafe(p + i + 1, &rel)) continue;
             PVOID target = p + i + 5 + rel;
             if (!IsKernelAddress(target)) continue;
 
-            if (op == 0xE8) {
-                lastCallCandidate = target;
-                DbgPrint("[OpenSysKit] [Resolve#2.scan] rel32 call @+0x%03lX -> %p\n", i, target);
-            } else {
-                lastJmpCandidate = target;
-                DbgPrint("[OpenSysKit] [Resolve#2.scan] rel32 jmp  @+0x%03lX -> %p\n", i, target);
-            }
-            continue;
+            callTargets[callCount] = (ULONG_PTR)target;
+            callOffsets[callCount] = i;
+            DbgPrint("[OpenSysKit] [Resolve#2.scan] call[%lu] @+0x%03lX -> %p\n",
+                callCount, i, target);
+            callCount++;
         }
+    }
 
-        if (op == 0xEB) {
-            if (i + 1 >= bodyScanLimit) break;
-            CHAR rel = (CHAR)p[i + 1];
-            PVOID target = p + i + 2 + rel;
-            if (IsKernelAddress(target)) {
-                lastJmpCandidate = target;
-                DbgPrint("[OpenSysKit] [Resolve#2.scan] rel8 jmp @+0x%03lX -> %p\n", i, target);
-            }
-            continue;
-        }
+    if (callCount == 0) {
+        DbgPrint("[OpenSysKit] [Resolve#2] no calls found after first ret\n");
+        return nullptr;
+    }
 
-        if (op == 0xFF && i + 5 < bodyScanLimit) {
-            UCHAR modrm = p[i + 1];
-            if (modrm == 0x15 || modrm == 0x25) {
-                LONG disp = 0;
-                if (!ReadLongSafe(p + i + 2, &disp)) continue;
-                PVOID slot = p + i + 6 + disp;
-                PVOID target = nullptr;
-                if (!ReadPointerSafe(slot, &target) || !IsKernelAddress(target)) continue;
+    // 第二阶段：找等差簇起始位置，取簇之前最后一个孤立 call。
+    //
+    // 检测方法：从第二个 call 开始，计算相邻 call 目标地址差值，
+    // 若连续 clusterThreshold 个差值相同则认定为等差簇。
+    //
+    ULONG clusterStart = callCount; // 默认没有簇
 
-                if (modrm == 0x15) {
-                    lastCallCandidate = target;
-                    DbgPrint("[OpenSysKit] [Resolve#2.scan] rip-indirect call @+0x%03lX -> %p\n", i, target);
-                } else {
-                    lastJmpCandidate = target;
-                    DbgPrint("[OpenSysKit] [Resolve#2.scan] rip-indirect jmp  @+0x%03lX -> %p\n", i, target);
+    if (callCount >= clusterThreshold + 1) {
+        for (ULONG i = 1; i + clusterThreshold - 1 < callCount; ++i) {
+            ULONG_PTR diff = callTargets[i] - callTargets[i - 1];
+            if (diff == 0) continue; // 相同地址不算
+
+            BOOLEAN isCluster = TRUE;
+            for (ULONG j = i + 1; j <= i + clusterThreshold - 1; ++j) {
+                if (callTargets[j] - callTargets[j - 1] != diff) {
+                    isCluster = FALSE;
+                    break;
                 }
             }
+
+            if (isCluster) {
+                clusterStart = i - 1; // 簇从 i-1 开始（第一个参与等差的）
+                DbgPrint("[OpenSysKit] [Resolve#2] cluster detected at call[%lu] "
+                    "(diff=0x%llX), target before cluster: call[%lu] @+0x%03lX -> %p\n",
+                    clusterStart, (ULONG64)diff,
+                    clusterStart > 0 ? clusterStart - 1 : 0,
+                    clusterStart > 0 ? callOffsets[clusterStart - 1] : 0,
+                    clusterStart > 0 ? (PVOID)callTargets[clusterStart - 1] : nullptr);
+                break;
+            }
         }
     }
 
-    if (lastCallCandidate) {
-        DbgPrint("[OpenSysKit] [Resolve#2] using last call candidate: %p\n", lastCallCandidate);
-        g_ProcessDirectKillSource = ProcessDirectKillSourceZwResolvedTarget;
-        return (PFN_PSP_TERMINATE_PROCESS)lastCallCandidate;
-    }
+    // 取等差簇之前的最后一个 call
+    ULONG targetIdx = (clusterStart > 0) ? clusterStart - 1 : callCount - 1;
+    PVOID result = (PVOID)callTargets[targetIdx];
 
-    if (lastJmpCandidate) {
-        DbgPrint("[OpenSysKit] [Resolve#2] no call found, last jmp candidate: %p\n", lastJmpCandidate);
-        g_ProcessDirectKillSource = ProcessDirectKillSourceZwResolvedTarget;
-        return (PFN_PSP_TERMINATE_PROCESS)lastJmpCandidate;
-    }
+    DbgPrint("[OpenSysKit] [Resolve#2] selected call[%lu] @+0x%03lX -> %p as PspTerminateProcess candidate\n",
+        targetIdx, callOffsets[targetIdx], result);
 
-    DbgPrint("[OpenSysKit] [Resolve#2] no candidate found\n");
-    return nullptr;
+    g_ProcessDirectKillSource = ProcessDirectKillSourceZwResolvedTarget;
+    return (PFN_PSP_TERMINATE_PROCESS)result;
 }
 
 // ---------- 主入口 ----------
@@ -431,8 +469,8 @@ NTSTATUS ProcessEnumerate(PVOID OutputBuffer, ULONG OutputBufferSize, PULONG Byt
         entry = (PSYSTEM_PROCESS_INFORMATION_ENTRY)((PUCHAR)entry + entry->NextEntryOffset);
     }
 
-    header->Count    = written;
-    *BytesWritten    = sizeof(PROCESS_LIST_HEADER) + written * sizeof(PROCESS_INFO);
+    header->Count = written;
+    *BytesWritten = sizeof(PROCESS_LIST_HEADER) + written * sizeof(PROCESS_INFO);
 
     ExFreePoolWithTag(buffer, 'ksyS');
     return STATUS_SUCCESS;
@@ -464,7 +502,7 @@ NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
     }
 
     // --- 路径 1：直连终止（PsTerminateProcess / PspTerminateProcess）---
-    if (g_PspTerminateProcess) {
+    if (g_PspTerminateProcess && ValidateFunctionPointer((PVOID)g_PspTerminateProcess)) {
         PEPROCESS process = nullptr;
         NTSTATUS status = PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)ProcessId, &process);
         if (NT_SUCCESS(status)) {
@@ -483,17 +521,27 @@ NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
                 }
             }
 
-            status = g_PspTerminateProcess(process, STATUS_SUCCESS);
+            // SEH 保护：防止解析到错误地址时蓝屏
+            NTSTATUS killStatus = STATUS_UNSUCCESSFUL;
+            __try {
+                killStatus = g_PspTerminateProcess(process, STATUS_SUCCESS);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) {
+                DbgPrint("[OpenSysKit] direct path exception 0x%08X, falling back to Zw\n",
+                    GetExceptionCode());
+                killStatus = STATUS_UNSUCCESSFUL;
+            }
+
             ObDereferenceObject(process);
 
-            if (NT_SUCCESS(status)) {
+            if (NT_SUCCESS(killStatus)) {
                 FillProcessKillResult(Result, PROCESS_KILL_METHOD_PSP, STATUS_SUCCESS);
                 DbgPrint("[OpenSysKit] ProcessKill PID=%lu via %s OK\n",
                     ProcessId, ProcessDirectKillSourceName(g_ProcessDirectKillSource));
                 return STATUS_SUCCESS;
             }
             DbgPrint("[OpenSysKit] direct path (%s) failed (0x%08X), falling back to Zw\n",
-                ProcessDirectKillSourceName(g_ProcessDirectKillSource), status);
+                ProcessDirectKillSourceName(g_ProcessDirectKillSource), killStatus);
         }
     }
 
