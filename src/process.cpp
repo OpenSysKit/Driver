@@ -1,4 +1,3 @@
-#include <ntifs.h>
 #include "process.h"
 
 // ZwQuerySystemInformation 未在公开头文件中声明
