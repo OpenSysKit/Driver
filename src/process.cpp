@@ -1,3 +1,10 @@
+#ifndef NTDDI_VERSION
+#define NTDDI_VERSION 0x0A000008
+#endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
+
 #include <ntifs.h>
 #include "process.h"
 
