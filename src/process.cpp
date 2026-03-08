@@ -32,9 +32,7 @@ extern "C" NTSTATUS NTAPI ZwQueryInformationProcess(
 #endif
 
 // ========== PEPROCESS 直连终止路径解析 ==========
-//
-// 签名：NTSTATUS Ps/PspTerminateProcess(PEPROCESS Process, NTSTATUS ExitStatus)
-//
+
 typedef NTSTATUS(NTAPI* PFN_PSP_TERMINATE_PROCESS)(PEPROCESS Process, NTSTATUS ExitStatus);
 
 typedef enum _PROCESS_DIRECT_KILL_SOURCE {
@@ -50,18 +48,14 @@ static PROCESS_DIRECT_KILL_SOURCE g_ProcessDirectKillSource = ProcessDirectKillS
 static PCSTR ProcessDirectKillSourceName(_In_ PROCESS_DIRECT_KILL_SOURCE Source)
 {
     switch (Source) {
-    case ProcessDirectKillSourcePsExport:
-        return "PsTerminateProcess export";
-    case ProcessDirectKillSourcePsResolvedTarget:
-        return "PsTerminateProcess resolved target";
-    case ProcessDirectKillSourceZwResolvedTarget:
-        return "ZwTerminateProcess resolved target";
-    default:
-        return "unresolved";
+    case ProcessDirectKillSourcePsExport:          return "PsTerminateProcess export";
+    case ProcessDirectKillSourcePsResolvedTarget:  return "PsTerminateProcess resolved target";
+    case ProcessDirectKillSourceZwResolvedTarget:  return "ZwTerminateProcess resolved target";
+    default:                                       return "unresolved";
     }
 }
 
-// ---------- 工具：验证地址是否在内核空间 ----------
+// ---------- 工具函数 ----------
 
 static BOOLEAN IsKernelAddress(PVOID addr)
 {
@@ -101,14 +95,11 @@ static VOID LogStubBytes(_In_ PCSTR Tag, _In_opt_ PVOID Address, _In_ ULONG Coun
         return;
     }
 
-    if (Count > RTL_NUMBER_OF(bytes)) {
-        Count = RTL_NUMBER_OF(bytes);
-    }
+    if (Count > RTL_NUMBER_OF(bytes)) Count = RTL_NUMBER_OF(bytes);
 
     __try {
-        for (; copied < Count; ++copied) {
+        for (; copied < Count; ++copied)
             bytes[copied] = ((PUCHAR)Address)[copied];
-        }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         DbgPrint("[OpenSysKit] [%s] failed to read stub bytes at %p\n", Tag, Address);
@@ -116,12 +107,12 @@ static VOID LogStubBytes(_In_ PCSTR Tag, _In_opt_ PVOID Address, _In_ ULONG Coun
     }
 
     DbgPrint(
-        "[OpenSysKit] [%s] head @%p: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n",
-        Tag,
-        Address,
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11],
+        "[OpenSysKit] [%s] head @%p: %02X %02X %02X %02X %02X %02X %02X %02X "
+        "%02X %02X %02X %02X %02X %02X %02X %02X\n",
+        Tag, Address,
+        bytes[0],  bytes[1],  bytes[2],  bytes[3],
+        bytes[4],  bytes[5],  bytes[6],  bytes[7],
+        bytes[8],  bytes[9],  bytes[10], bytes[11],
         bytes[12], bytes[13], bytes[14], bytes[15]
     );
 }
@@ -129,100 +120,60 @@ static VOID LogStubBytes(_In_ PCSTR Tag, _In_opt_ PVOID Address, _In_ ULONG Coun
 static VOID FillProcessKillResult(
     _Out_ PPROCESS_KILL_RESULT Result,
     _In_ ULONG Method,
-    _In_ NTSTATUS OperationStatus
-)
+    _In_ NTSTATUS OperationStatus)
 {
-    Result->Version = PROCESS_KILL_RESULT_VERSION;
+    Result->Version         = PROCESS_KILL_RESULT_VERSION;
     Result->OperationStatus = (ULONG)OperationStatus;
-    Result->Method = Method;
-    Result->Reserved = 0;
+    Result->Method          = Method;
+    Result->Reserved        = 0;
 }
 
 //
-// 从函数 stub 中扫描常见的控制转移指令，提取目标地址。
-// 这里仅做保守识别：rel32 call/jmp、rel8 jmp、RIP 相对的间接 call/jmp。
+// 从 stub 中找第一个控制转移指令（call/jmp），用于跟进 syscall stub -> 实现体。
 //
 static PVOID ScanStubTransfer(_In_ PVOID FuncBase, _In_ ULONG MaxScan, _In_opt_ PCSTR Tag)
 {
+    if (!FuncBase) return nullptr;
+
     PUCHAR p = (PUCHAR)FuncBase;
 
-    if (!FuncBase) {
-        return nullptr;
-    }
-
     for (ULONG i = 0; i < MaxScan; ++i) {
-        UCHAR opcode = p[i];
-        if (opcode == 0xC3 || opcode == 0xC2) {
-            break;
-        }
+        UCHAR op = p[i];
 
-        if (opcode == 0xE8 || opcode == 0xE9) {
-            if (i + 4 >= MaxScan) {
-                break;
-            }
+        if (op == 0xC3 || op == 0xC2) break;
 
+        if (op == 0xE8 || op == 0xE9) {
+            if (i + 4 >= MaxScan) break;
             LONG rel = 0;
-            if (!ReadLongSafe(p + i + 1, &rel)) {
-                continue;
-            }
-
+            if (!ReadLongSafe(p + i + 1, &rel)) continue;
             PVOID target = p + i + 5 + rel;
             if (IsKernelAddress(target)) {
-                if (Tag) {
-                    DbgPrint(
-                        "[OpenSysKit] [%s] %s @+0x%02lX -> %p\n",
-                        Tag,
-                        (opcode == 0xE8) ? "rel32 call" : "rel32 jmp",
-                        i,
-                        target
-                    );
-                }
+                if (Tag) DbgPrint("[OpenSysKit] [%s] %s @+0x%02lX -> %p\n",
+                    Tag, op == 0xE8 ? "rel32 call" : "rel32 jmp", i, target);
                 return target;
             }
-            continue;
         }
 
-        if (opcode == 0xEB) {
-            if (i + 1 >= MaxScan) {
-                break;
-            }
-
+        if (op == 0xEB) {
+            if (i + 1 >= MaxScan) break;
             CHAR rel = (CHAR)p[i + 1];
             PVOID target = p + i + 2 + rel;
             if (IsKernelAddress(target)) {
-                if (Tag) {
-                    DbgPrint("[OpenSysKit] [%s] rel8 jmp @+0x%02lX -> %p\n", Tag, i, target);
-                }
+                if (Tag) DbgPrint("[OpenSysKit] [%s] rel8 jmp @+0x%02lX -> %p\n", Tag, i, target);
                 return target;
             }
-            continue;
         }
 
-        if (opcode == 0xFF) {
-            if (i + 5 >= MaxScan) {
-                break;
-            }
-
+        if (op == 0xFF && i + 5 < MaxScan) {
             UCHAR modrm = p[i + 1];
             if (modrm == 0x15 || modrm == 0x25) {
                 LONG disp = 0;
-                if (!ReadLongSafe(p + i + 2, &disp)) {
-                    continue;
-                }
-
+                if (!ReadLongSafe(p + i + 2, &disp)) continue;
                 PVOID slot = p + i + 6 + disp;
                 PVOID target = nullptr;
                 if (ReadPointerSafe(slot, &target) && IsKernelAddress(target)) {
-                    if (Tag) {
-                        DbgPrint(
-                            "[OpenSysKit] [%s] rip-indirect %s @+0x%02lX -> slot=%p target=%p\n",
-                            Tag,
-                            (modrm == 0x15) ? "call" : "jmp",
-                            i,
-                            slot,
-                            target
-                        );
-                    }
+                    if (Tag) DbgPrint("[OpenSysKit] [%s] rip-indirect %s @+0x%02lX -> slot=%p target=%p\n",
+                        Tag, modrm == 0x15 ? "call" : "jmp", i, slot, target);
                     return target;
                 }
             }
@@ -230,17 +181,18 @@ static PVOID ScanStubTransfer(_In_ PVOID FuncBase, _In_ ULONG MaxScan, _In_opt_ 
     }
 
     if (Tag) {
-        DbgPrint("[OpenSysKit] [%s] no recognized control-transfer pattern within %lu bytes\n", Tag, MaxScan);
+        DbgPrint("[OpenSysKit] [%s] no control-transfer within %lu bytes\n", Tag, MaxScan);
         LogStubBytes(Tag, FuncBase, 8);
     }
     return nullptr;
 }
 
-static PFN_PSP_TERMINATE_PROCESS ResolvePsTerminateProcessExport()
+// ---------- 策略 1：PsTerminateProcess 导出 ----------
+
+static PFN_PSP_TERMINATE_PROCESS ResolveViaPsTerminateProcess()
 {
     UNICODE_STRING name;
     RtlInitUnicodeString(&name, L"PsTerminateProcess");
-
     PVOID stub = MmGetSystemRoutineAddress(&name);
     if (!stub) {
         DbgPrint("[OpenSysKit] [Resolve#1] PsTerminateProcess export not found\n");
@@ -248,46 +200,33 @@ static PFN_PSP_TERMINATE_PROCESS ResolvePsTerminateProcessExport()
     }
 
     DbgPrint("[OpenSysKit] [Resolve#1] PsTerminateProcess export=%p\n", stub);
-    LogStubBytes("Resolve#1", stub, 8);
-    return (PFN_PSP_TERMINATE_PROCESS)stub;
-}
+    LogStubBytes("Resolve#1", stub, 16);
 
-// ---------- 策略 1：优先直接使用 PsTerminateProcess 导出 ----------
-//
-// 对当前系统来说，这条路径比扫描内部 Psp 更稳；若 stub 能进一步解析到内部目标，
-// 则优先使用解析结果，否则直接使用导出入口本身。
-//
-static PFN_PSP_TERMINATE_PROCESS ResolveViaPsTerminateProcess()
-{
-    PFN_PSP_TERMINATE_PROCESS exportEntry = ResolvePsTerminateProcessExport();
-    if (!exportEntry) {
-        return nullptr;
-    }
-
-    PVOID target = ScanStubTransfer((PVOID)exportEntry, 64, "Resolve#1");
-    if (target && target != (PVOID)exportEntry) {
-        DbgPrint("[OpenSysKit] [Resolve#1] using resolved target behind PsTerminateProcess: %p\n", target);
+    PVOID target = ScanStubTransfer(stub, 64, "Resolve#1");
+    if (target && target != stub) {
+        DbgPrint("[OpenSysKit] [Resolve#1] using resolved target: %p\n", target);
         g_ProcessDirectKillSource = ProcessDirectKillSourcePsResolvedTarget;
         return (PFN_PSP_TERMINATE_PROCESS)target;
     }
 
     DbgPrint("[OpenSysKit] [Resolve#1] using PsTerminateProcess export directly\n");
     g_ProcessDirectKillSource = ProcessDirectKillSourcePsExport;
-    return exportEntry;
+    return (PFN_PSP_TERMINATE_PROCESS)stub;
 }
 
-// ---------- 策略 2：ZwTerminateProcess 调用链扫描（备用）----------
+// ---------- 策略 2：ZwTerminateProcess 调用链扫描 ----------
 //
-// 若 PsTerminateProcess 导出不可用，则尝试沿 ZwTerminateProcess 的导出 stub 找到
-// 内部实现，再从其函数体中提取最后一个合理的 call 目标作为候选。
+// 关键修复：遇到 ret 不再 break，继续扫描整个函数体，
+// 收集所有 E8 call 候选，最终取最后一个（最深层调用，
+// 通常就是 PspTerminateProcess）。
+// bodyScanLimit 加大到 1024 覆盖完整函数体。
 //
 static PFN_PSP_TERMINATE_PROCESS ResolveViaZwTerminateProcess()
 {
-    const ULONG bodyScanLimit = 512;
+    const ULONG bodyScanLimit = 1024;
 
     UNICODE_STRING name;
     RtlInitUnicodeString(&name, L"ZwTerminateProcess");
-
     PVOID zwStub = MmGetSystemRoutineAddress(&name);
     if (!zwStub) {
         DbgPrint("[OpenSysKit] [Resolve#2] ZwTerminateProcess export not found\n");
@@ -295,81 +234,73 @@ static PFN_PSP_TERMINATE_PROCESS ResolveViaZwTerminateProcess()
     }
 
     DbgPrint("[OpenSysKit] [Resolve#2] ZwTerminateProcess export=%p\n", zwStub);
-    LogStubBytes("Resolve#2", zwStub, 8);
+    LogStubBytes("Resolve#2", zwStub, 16);
 
+    // 跟进 syscall stub -> NtTerminateProcess 函数体
     PVOID body = ScanStubTransfer(zwStub, 64, "Resolve#2.stub");
     PUCHAR p = (PUCHAR)(body ? body : zwStub);
-    PVOID lastCallCandidate = nullptr;
-    PVOID lastJumpCandidate = nullptr;
 
     if (body) {
-        DbgPrint("[OpenSysKit] [Resolve#2] using ZwTerminateProcess body candidate: %p\n", body);
+        DbgPrint("[OpenSysKit] [Resolve#2] body candidate: %p\n", body);
         LogStubBytes("Resolve#2.body", body, 16);
     }
 
+    PVOID lastCallCandidate = nullptr;
+    PVOID lastJmpCandidate  = nullptr;
+
     for (ULONG i = 0; i < bodyScanLimit; ++i) {
-        if (p[i] == 0xC3 || p[i] == 0xC2) {
-            DbgPrint("[OpenSysKit] [Resolve#2.scan] hit ret @+0x%02lX, stop linear scan\n", i);
-            break;
+        UCHAR op = p[i];
+
+        // ret: 不 break，继续扫描（函数内可能有多个 ret 分支）
+        if (op == 0xC3 || op == 0xC2) {
+            DbgPrint("[OpenSysKit] [Resolve#2.scan] ret @+0x%03lX, continuing\n", i);
+            continue;
         }
 
-        if (p[i] == 0xE8 || p[i] == 0xE9) {
-            if (i + 4 >= bodyScanLimit) {
-                break;
-            }
-
+        if (op == 0xE8 || op == 0xE9) {
+            if (i + 4 >= bodyScanLimit) break;
             LONG rel = 0;
-            if (!ReadLongSafe(p + i + 1, &rel)) {
-                continue;
-            }
-
+            if (!ReadLongSafe(p + i + 1, &rel)) continue;
             PVOID target = p + i + 5 + rel;
-            if (!IsKernelAddress(target)) {
-                continue;
-            }
+            if (!IsKernelAddress(target)) continue;
 
-            if (p[i] == 0xE8) {
+            if (op == 0xE8) {
                 lastCallCandidate = target;
-                DbgPrint("[OpenSysKit] [Resolve#2.scan] rel32 call @+0x%02lX -> %p\n", i, target);
+                DbgPrint("[OpenSysKit] [Resolve#2.scan] rel32 call @+0x%03lX -> %p\n", i, target);
             } else {
-                lastJumpCandidate = target;
-                DbgPrint("[OpenSysKit] [Resolve#2.scan] rel32 jmp @+0x%02lX -> %p\n", i, target);
+                lastJmpCandidate = target;
+                DbgPrint("[OpenSysKit] [Resolve#2.scan] rel32 jmp  @+0x%03lX -> %p\n", i, target);
             }
             continue;
         }
 
-        if (p[i] == 0xEB) {
-            if (i + 1 >= bodyScanLimit) {
-                break;
-            }
-
+        if (op == 0xEB) {
+            if (i + 1 >= bodyScanLimit) break;
             CHAR rel = (CHAR)p[i + 1];
             PVOID target = p + i + 2 + rel;
             if (IsKernelAddress(target)) {
-                lastJumpCandidate = target;
-                DbgPrint("[OpenSysKit] [Resolve#2.scan] rel8 jmp @+0x%02lX -> %p\n", i, target);
+                lastJmpCandidate = target;
+                DbgPrint("[OpenSysKit] [Resolve#2.scan] rel8 jmp @+0x%03lX -> %p\n", i, target);
             }
             continue;
         }
 
-        if (i + 5 < bodyScanLimit && p[i] == 0xFF && (p[i + 1] == 0x15 || p[i + 1] == 0x25)) {
-            LONG disp = 0;
-            if (!ReadLongSafe(p + i + 2, &disp)) {
-                continue;
-            }
+        if (op == 0xFF && i + 5 < bodyScanLimit) {
+            UCHAR modrm = p[i + 1];
+            if (modrm == 0x15 || modrm == 0x25) {
+                LONG disp = 0;
+                if (!ReadLongSafe(p + i + 2, &disp)) continue;
+                PVOID slot = p + i + 6 + disp;
+                PVOID target = nullptr;
+                if (!ReadPointerSafe(slot, &target) || !IsKernelAddress(target)) continue;
 
-            PVOID slot = p + i + 6 + disp;
-            PVOID target = nullptr;
-            if (!ReadPointerSafe(slot, &target) || !IsKernelAddress(target)) {
-                continue;
-            }
-
-            if (p[i + 1] == 0x15) {
-                lastCallCandidate = target;
-                DbgPrint("[OpenSysKit] [Resolve#2.scan] rip-indirect call @+0x%02lX -> slot=%p target=%p\n", i, slot, target);
-            } else {
-                lastJumpCandidate = target;
-                DbgPrint("[OpenSysKit] [Resolve#2.scan] rip-indirect jmp @+0x%02lX -> slot=%p target=%p\n", i, slot, target);
+                if (modrm == 0x15) {
+                    lastCallCandidate = target;
+                    DbgPrint("[OpenSysKit] [Resolve#2.scan] rip-indirect call @+0x%03lX -> %p\n", i, target);
+                } else {
+                    lastJmpCandidate = target;
+                    DbgPrint("[OpenSysKit] [Resolve#2.scan] rip-indirect jmp  @+0x%03lX -> %p\n", i, target);
+                }
             }
         }
     }
@@ -380,11 +311,13 @@ static PFN_PSP_TERMINATE_PROCESS ResolveViaZwTerminateProcess()
         return (PFN_PSP_TERMINATE_PROCESS)lastCallCandidate;
     }
 
-    if (lastJumpCandidate) {
-        DbgPrint("[OpenSysKit] [Resolve#2] no call candidate found; last jump candidate=%p (not used automatically)\n", lastJumpCandidate);
-    } else {
-        DbgPrint("[OpenSysKit] [Resolve#2] no call or jump candidate found in ZwTerminateProcess body\n");
+    if (lastJmpCandidate) {
+        DbgPrint("[OpenSysKit] [Resolve#2] no call found, last jmp candidate: %p\n", lastJmpCandidate);
+        g_ProcessDirectKillSource = ProcessDirectKillSourceZwResolvedTarget;
+        return (PFN_PSP_TERMINATE_PROCESS)lastJmpCandidate;
     }
+
+    DbgPrint("[OpenSysKit] [Resolve#2] no candidate found\n");
     return nullptr;
 }
 
@@ -392,33 +325,27 @@ static PFN_PSP_TERMINATE_PROCESS ResolveViaZwTerminateProcess()
 
 VOID ResolvePspTerminateProcess()
 {
-    g_PspTerminateProcess = nullptr;
+    g_PspTerminateProcess     = nullptr;
     g_ProcessDirectKillSource = ProcessDirectKillSourceNone;
 
     g_PspTerminateProcess = ResolveViaPsTerminateProcess();
     if (g_PspTerminateProcess) {
-        DbgPrint(
-            "[OpenSysKit] direct terminate path ready via %s: %p\n",
-            ProcessDirectKillSourceName(g_ProcessDirectKillSource),
-            g_PspTerminateProcess
-        );
+        DbgPrint("[OpenSysKit] direct terminate path ready via %s: %p\n",
+            ProcessDirectKillSourceName(g_ProcessDirectKillSource), g_PspTerminateProcess);
         return;
     }
 
     g_PspTerminateProcess = ResolveViaZwTerminateProcess();
     if (g_PspTerminateProcess) {
-        DbgPrint(
-            "[OpenSysKit] direct terminate path ready via %s: %p\n",
-            ProcessDirectKillSourceName(g_ProcessDirectKillSource),
-            g_PspTerminateProcess
-        );
+        DbgPrint("[OpenSysKit] direct terminate path ready via %s: %p\n",
+            ProcessDirectKillSourceName(g_ProcessDirectKillSource), g_PspTerminateProcess);
         return;
     }
 
     DbgPrint("[OpenSysKit] direct terminate path unresolved, will fallback to ZwTerminateProcess handle path\n");
 }
 
-// ========== 系统进程信息结构（部分字段）==========
+// ========== 系统进程信息结构 ==========
 
 typedef struct _SYSTEM_PROCESS_INFORMATION_ENTRY {
     ULONG NextEntryOffset;
@@ -449,15 +376,11 @@ NTSTATUS ProcessEnumerate(PVOID OutputBuffer, ULONG OutputBufferSize, PULONG Byt
 
     ULONG bufferSize = 0;
     NTSTATUS status = ZwQuerySystemInformation(SystemProcessInformation, NULL, 0, &bufferSize);
-    if (status != STATUS_INFO_LENGTH_MISMATCH) {
-        return status;
-    }
+    if (status != STATUS_INFO_LENGTH_MISMATCH) return status;
 
     bufferSize += 4096;
     PVOID buffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, bufferSize, 'ksyS');
-    if (!buffer) {
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
+    if (!buffer) return STATUS_INSUFFICIENT_RESOURCES;
 
     status = ZwQuerySystemInformation(SystemProcessInformation, buffer, bufferSize, &bufferSize);
     if (!NT_SUCCESS(status)) {
@@ -473,14 +396,13 @@ NTSTATUS ProcessEnumerate(PVOID OutputBuffer, ULONG OutputBufferSize, PULONG Byt
         entry = (PSYSTEM_PROCESS_INFORMATION_ENTRY)((PUCHAR)entry + entry->NextEntryOffset);
     }
 
-    ULONG requiredSize = sizeof(PROCESS_LIST_HEADER) + processCount * sizeof(PROCESS_INFO);
     if (OutputBufferSize < sizeof(PROCESS_LIST_HEADER)) {
         ExFreePoolWithTag(buffer, 'ksyS');
         return STATUS_BUFFER_TOO_SMALL;
     }
 
     PPROCESS_LIST_HEADER header = (PPROCESS_LIST_HEADER)OutputBuffer;
-    header->TotalSize = requiredSize;
+    header->TotalSize = sizeof(PROCESS_LIST_HEADER) + processCount * sizeof(PROCESS_INFO);
 
     ULONG maxEntries = (OutputBufferSize - sizeof(PROCESS_LIST_HEADER)) / sizeof(PROCESS_INFO);
     PPROCESS_INFO outEntry = (PPROCESS_INFO)((PUCHAR)OutputBuffer + sizeof(PROCESS_LIST_HEADER));
@@ -490,14 +412,15 @@ NTSTATUS ProcessEnumerate(PVOID OutputBuffer, ULONG OutputBufferSize, PULONG Byt
     while (TRUE) {
         if (written >= maxEntries) break;
 
-        outEntry->ProcessId = (ULONG)(ULONG_PTR)entry->UniqueProcessId;
+        outEntry->ProcessId       = (ULONG)(ULONG_PTR)entry->UniqueProcessId;
         outEntry->ParentProcessId = (ULONG)(ULONG_PTR)entry->InheritedFromUniqueProcessId;
-        outEntry->ThreadCount = entry->NumberOfThreads;
-        outEntry->WorkingSetSize = entry->WorkingSetSize;
+        outEntry->ThreadCount     = entry->NumberOfThreads;
+        outEntry->WorkingSetSize  = entry->WorkingSetSize;
 
         RtlZeroMemory(outEntry->ImageName, sizeof(outEntry->ImageName));
         if (entry->ImageName.Buffer && entry->ImageName.Length > 0) {
-            USHORT copyLen = min(entry->ImageName.Length, (USHORT)(sizeof(outEntry->ImageName) - sizeof(WCHAR)));
+            USHORT copyLen = min(entry->ImageName.Length,
+                (USHORT)(sizeof(outEntry->ImageName) - sizeof(WCHAR)));
             RtlCopyMemory(outEntry->ImageName, entry->ImageName.Buffer, copyLen);
         }
 
@@ -508,8 +431,8 @@ NTSTATUS ProcessEnumerate(PVOID OutputBuffer, ULONG OutputBufferSize, PULONG Byt
         entry = (PSYSTEM_PROCESS_INFORMATION_ENTRY)((PUCHAR)entry + entry->NextEntryOffset);
     }
 
-    header->Count = written;
-    *BytesWritten = sizeof(PROCESS_LIST_HEADER) + written * sizeof(PROCESS_INFO);
+    header->Count    = written;
+    *BytesWritten    = sizeof(PROCESS_LIST_HEADER) + written * sizeof(PROCESS_INFO);
 
     ExFreePoolWithTag(buffer, 'ksyS');
     return STATUS_SUCCESS;
@@ -521,11 +444,9 @@ static NTSTATUS OpenProcessById(ULONG ProcessId, PHANDLE ProcessHandle, ACCESS_M
 {
     OBJECT_ATTRIBUTES objAttr;
     CLIENT_ID clientId;
-
     clientId.UniqueProcess = (HANDLE)(ULONG_PTR)ProcessId;
-    clientId.UniqueThread = NULL;
+    clientId.UniqueThread  = NULL;
     InitializeObjectAttributes(&objAttr, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
-
     return ZwOpenProcess(ProcessHandle, Access, &objAttr, &clientId);
 }
 
@@ -533,9 +454,7 @@ static NTSTATUS OpenProcessById(ULONG ProcessId, PHANDLE ProcessHandle, ACCESS_M
 
 NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
 {
-    if (!Result) {
-        return STATUS_INVALID_PARAMETER;
-    }
+    if (!Result) return STATUS_INVALID_PARAMETER;
 
     FillProcessKillResult(Result, PROCESS_KILL_METHOD_NONE, STATUS_UNSUCCESSFUL);
 
@@ -544,22 +463,20 @@ NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
         return STATUS_SUCCESS;
     }
 
-    // --- 路径 1：直连终止路径（优先 PsTerminateProcess 导出/解析目标）---
+    // --- 路径 1：直连终止（PsTerminateProcess / PspTerminateProcess）---
     if (g_PspTerminateProcess) {
         PEPROCESS process = nullptr;
         NTSTATUS status = PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)ProcessId, &process);
         if (NT_SUCCESS(status)) {
+            // 检查 BreakOnTermination
             HANDLE hTmp = NULL;
-            NTSTATUS queryStatus = OpenProcessById(ProcessId, &hTmp, PROCESS_QUERY_LIMITED_INFORMATION);
-            if (NT_SUCCESS(queryStatus)) {
+            NTSTATUS qs = OpenProcessById(ProcessId, &hTmp, PROCESS_QUERY_LIMITED_INFORMATION);
+            if (NT_SUCCESS(qs)) {
                 ULONG breakOnTermination = 0;
-                queryStatus = ZwQueryInformationProcess(
-                    hTmp, ProcessBreakOnTermination,
-                    &breakOnTermination, sizeof(breakOnTermination), NULL
-                );
+                qs = ZwQueryInformationProcess(hTmp, ProcessBreakOnTermination,
+                    &breakOnTermination, sizeof(breakOnTermination), NULL);
                 ZwClose(hTmp);
-
-                if (NT_SUCCESS(queryStatus) && breakOnTermination != 0) {
+                if (NT_SUCCESS(qs) && breakOnTermination != 0) {
                     ObDereferenceObject(process);
                     FillProcessKillResult(Result, PROCESS_KILL_METHOD_NONE, STATUS_ACCESS_DENIED);
                     return STATUS_SUCCESS;
@@ -571,37 +488,27 @@ NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
 
             if (NT_SUCCESS(status)) {
                 FillProcessKillResult(Result, PROCESS_KILL_METHOD_PSP, STATUS_SUCCESS);
-                DbgPrint(
-                    "[OpenSysKit] ProcessKill PID=%lu via direct path (%s) OK\n",
-                    ProcessId,
-                    ProcessDirectKillSourceName(g_ProcessDirectKillSource)
-                );
+                DbgPrint("[OpenSysKit] ProcessKill PID=%lu via %s OK\n",
+                    ProcessId, ProcessDirectKillSourceName(g_ProcessDirectKillSource));
                 return STATUS_SUCCESS;
             }
-            DbgPrint(
-                "[OpenSysKit] direct path (%s) failed (0x%08X), falling back to Zw\n",
-                ProcessDirectKillSourceName(g_ProcessDirectKillSource),
-                status
-            );
+            DbgPrint("[OpenSysKit] direct path (%s) failed (0x%08X), falling back to Zw\n",
+                ProcessDirectKillSourceName(g_ProcessDirectKillSource), status);
         }
     }
 
     // --- 路径 2：ZwTerminateProcess 回退 ---
     HANDLE hProcess = NULL;
-    NTSTATUS status = OpenProcessById(
-        ProcessId, &hProcess,
-        PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION
-    );
+    NTSTATUS status = OpenProcessById(ProcessId, &hProcess,
+        PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION);
     if (!NT_SUCCESS(status)) {
         FillProcessKillResult(Result, PROCESS_KILL_METHOD_ZW, status);
         return STATUS_SUCCESS;
     }
 
     ULONG breakOnTermination = 0;
-    status = ZwQueryInformationProcess(
-        hProcess, ProcessBreakOnTermination,
-        &breakOnTermination, sizeof(breakOnTermination), NULL
-    );
+    status = ZwQueryInformationProcess(hProcess, ProcessBreakOnTermination,
+        &breakOnTermination, sizeof(breakOnTermination), NULL);
     if (!NT_SUCCESS(status)) {
         ZwClose(hProcess);
         FillProcessKillResult(Result, PROCESS_KILL_METHOD_ZW, status);
@@ -624,13 +531,8 @@ NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
 
 NTSTATUS FileDeleteKernel(PCWSTR Path)
 {
-    if (!Path || Path[0] == L'\0') {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    if (Path[0] != L'\\') {
-        return STATUS_INVALID_PARAMETER;
-    }
+    if (!Path || Path[0] == L'\0') return STATUS_INVALID_PARAMETER;
+    if (Path[0] != L'\\')         return STATUS_INVALID_PARAMETER;
 
     UNICODE_STRING ntPath;
     RtlInitUnicodeString(&ntPath, Path);
@@ -642,30 +544,20 @@ NTSTATUS FileDeleteKernel(PCWSTR Path)
     HANDLE hFile = NULL;
 
     NTSTATUS status = ZwCreateFile(
-        &hFile,
-        DELETE | SYNCHRONIZE,
-        &objAttr,
-        &iosb,
-        NULL,
+        &hFile, DELETE | SYNCHRONIZE, &objAttr, &iosb, NULL,
         FILE_ATTRIBUTE_NORMAL,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         FILE_OPEN,
         FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
-        NULL,
-        0
+        NULL, 0
     );
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
+    if (!NT_SUCCESS(status)) return status;
 
     FILE_DISPOSITION_INFORMATION disposition = { 0 };
     disposition.DeleteFile = TRUE;
 
-    status = ZwSetInformationFile(
-        hFile, &iosb,
-        &disposition, sizeof(disposition),
-        FileDispositionInformation
-    );
+    status = ZwSetInformationFile(hFile, &iosb, &disposition,
+        sizeof(disposition), FileDispositionInformation);
 
     ZwClose(hFile);
     return status;
