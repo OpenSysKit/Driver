@@ -1,3 +1,4 @@
+#include <ntifs.h>
 #include "driver.h"
 
 // ========== PPL 相关定义 ==========
