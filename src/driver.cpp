@@ -115,7 +115,7 @@ static void DriverUnload(PDRIVER_OBJECT DriverObject)
         g_DriverContext.DeviceObject = NULL;
     }
 
-    DbgPrint("[OpenSysKit] 驱动已卸载，清理完成\n");
+    DbgPrint("[OpenSysKit] Driver unloaded and cleanup completed\n");
 }
 
 extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
@@ -150,20 +150,20 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
         &g_DriverContext.DeviceObject
     );
     if (!NT_SUCCESS(status)) {
-        DbgPrint("[OpenSysKit] 创建设备失败! Status: 0x%X\n", status);
+        DbgPrint("[OpenSysKit] IoCreateDevice failed, status=0x%X\n", status);
         return status;
     }
 
-    DbgPrint("[OpenSysKit] 设备创建成功: %ws\n", DEVICE_NAME);
+    DbgPrint("[OpenSysKit] Device created: %ws\n", DEVICE_NAME);
 
     status = IoCreateSymbolicLink(&symLink, &deviceName);
     if (!NT_SUCCESS(status)) {
-        DbgPrint("[OpenSysKit] 创建符号链接失败! Status: 0x%X\n", status);
+        DbgPrint("[OpenSysKit] IoCreateSymbolicLink failed, status=0x%X\n", status);
         IoDeleteDevice(g_DriverContext.DeviceObject);
         return status;
     }
 
-    DbgPrint("[OpenSysKit] 符号链接创建成功: %ws\n", SYMLINK_NAME);
+    DbgPrint("[OpenSysKit] Symbolic link created: %ws\n", SYMLINK_NAME);
 
     DriverObject->MajorFunction[IRP_MJ_CREATE]         = DispatchCreateClose;
     DriverObject->MajorFunction[IRP_MJ_CLOSE]          = DispatchCreateClose;
@@ -176,8 +176,8 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
     
     status = InitProtect();
     if (!NT_SUCCESS(status)) {
-        DbgPrint("[OpenSysKit] InitProtect 失败 (0x%X)，保护功能不可用\n", status);
-        // 非致命，继续加载
+        DbgPrint("[OpenSysKit] InitProtect failed (0x%X); protection features disabled\n", status);
+        // Non-fatal, continue loading.
     }
 
     DbgPrint("[OpenSysKit] ============================================\n");
