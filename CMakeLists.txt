@@ -7,7 +7,7 @@ find_package(WDK REQUIRED)
 wdk_add_driver(OpenSysKit
     src/driver.cpp
     src/process.cpp
-    src/callbacks.cpp
+    src/protect.cpp
 )
 
 target_include_directories(OpenSysKit PRIVATE src)
