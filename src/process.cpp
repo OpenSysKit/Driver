@@ -93,7 +93,7 @@ static BOOLEAN ReadPointerSafe(_In_ const VOID* Address, _Out_ PVOID* Value)
 
 static VOID LogStubBytes(_In_ PCSTR Tag, _In_opt_ PVOID Address, _In_ ULONG Count)
 {
-    UCHAR bytes[8] = {};
+    UCHAR bytes[16] = {};
     ULONG copied = 0;
 
     if (!Address) {
@@ -116,11 +116,13 @@ static VOID LogStubBytes(_In_ PCSTR Tag, _In_opt_ PVOID Address, _In_ ULONG Coun
     }
 
     DbgPrint(
-        "[OpenSysKit] [%s] head @%p: %02X %02X %02X %02X %02X %02X %02X %02X\n",
+        "[OpenSysKit] [%s] head @%p: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n",
         Tag,
         Address,
         bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7]
+        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11],
+        bytes[12], bytes[13], bytes[14], bytes[15]
     );
 }
 
@@ -281,6 +283,8 @@ static PFN_PSP_TERMINATE_PROCESS ResolveViaPsTerminateProcess()
 //
 static PFN_PSP_TERMINATE_PROCESS ResolveViaZwTerminateProcess()
 {
+    const ULONG bodyScanLimit = 512;
+
     UNICODE_STRING name;
     RtlInitUnicodeString(&name, L"ZwTerminateProcess");
 
@@ -295,19 +299,22 @@ static PFN_PSP_TERMINATE_PROCESS ResolveViaZwTerminateProcess()
 
     PVOID body = ScanStubTransfer(zwStub, 64, "Resolve#2.stub");
     PUCHAR p = (PUCHAR)(body ? body : zwStub);
-    PVOID lastCandidate = nullptr;
+    PVOID lastCallCandidate = nullptr;
+    PVOID lastJumpCandidate = nullptr;
 
     if (body) {
         DbgPrint("[OpenSysKit] [Resolve#2] using ZwTerminateProcess body candidate: %p\n", body);
+        LogStubBytes("Resolve#2.body", body, 16);
     }
 
-    for (ULONG i = 0; i < 256; i++) {
+    for (ULONG i = 0; i < bodyScanLimit; ++i) {
         if (p[i] == 0xC3 || p[i] == 0xC2) {
+            DbgPrint("[OpenSysKit] [Resolve#2.scan] hit ret @+0x%02lX, stop linear scan\n", i);
             break;
         }
 
-        if (p[i] == 0xE8) {
-            if (i + 4 >= 256) {
+        if (p[i] == 0xE8 || p[i] == 0xE9) {
+            if (i + 4 >= bodyScanLimit) {
                 break;
             }
 
@@ -317,13 +324,35 @@ static PFN_PSP_TERMINATE_PROCESS ResolveViaZwTerminateProcess()
             }
 
             PVOID target = p + i + 5 + rel;
-            if (IsKernelAddress(target)) {
-                lastCandidate = target;
+            if (!IsKernelAddress(target)) {
+                continue;
+            }
+
+            if (p[i] == 0xE8) {
+                lastCallCandidate = target;
+                DbgPrint("[OpenSysKit] [Resolve#2.scan] rel32 call @+0x%02lX -> %p\n", i, target);
+            } else {
+                lastJumpCandidate = target;
+                DbgPrint("[OpenSysKit] [Resolve#2.scan] rel32 jmp @+0x%02lX -> %p\n", i, target);
             }
             continue;
         }
 
-        if (i + 5 < 256 && p[i] == 0xFF && p[i + 1] == 0x15) {
+        if (p[i] == 0xEB) {
+            if (i + 1 >= bodyScanLimit) {
+                break;
+            }
+
+            CHAR rel = (CHAR)p[i + 1];
+            PVOID target = p + i + 2 + rel;
+            if (IsKernelAddress(target)) {
+                lastJumpCandidate = target;
+                DbgPrint("[OpenSysKit] [Resolve#2.scan] rel8 jmp @+0x%02lX -> %p\n", i, target);
+            }
+            continue;
+        }
+
+        if (i + 5 < bodyScanLimit && p[i] == 0xFF && (p[i + 1] == 0x15 || p[i + 1] == 0x25)) {
             LONG disp = 0;
             if (!ReadLongSafe(p + i + 2, &disp)) {
                 continue;
@@ -331,19 +360,31 @@ static PFN_PSP_TERMINATE_PROCESS ResolveViaZwTerminateProcess()
 
             PVOID slot = p + i + 6 + disp;
             PVOID target = nullptr;
-            if (ReadPointerSafe(slot, &target) && IsKernelAddress(target)) {
-                lastCandidate = target;
+            if (!ReadPointerSafe(slot, &target) || !IsKernelAddress(target)) {
+                continue;
+            }
+
+            if (p[i + 1] == 0x15) {
+                lastCallCandidate = target;
+                DbgPrint("[OpenSysKit] [Resolve#2.scan] rip-indirect call @+0x%02lX -> slot=%p target=%p\n", i, slot, target);
+            } else {
+                lastJumpCandidate = target;
+                DbgPrint("[OpenSysKit] [Resolve#2.scan] rip-indirect jmp @+0x%02lX -> slot=%p target=%p\n", i, slot, target);
             }
         }
     }
 
-    if (lastCandidate) {
-        DbgPrint("[OpenSysKit] [Resolve#2] ZwTerminateProcess scan -> %p\n", lastCandidate);
+    if (lastCallCandidate) {
+        DbgPrint("[OpenSysKit] [Resolve#2] using last call candidate: %p\n", lastCallCandidate);
         g_ProcessDirectKillSource = ProcessDirectKillSourceZwResolvedTarget;
-        return (PFN_PSP_TERMINATE_PROCESS)lastCandidate;
+        return (PFN_PSP_TERMINATE_PROCESS)lastCallCandidate;
     }
 
-    DbgPrint("[OpenSysKit] [Resolve#2] no call candidate found in ZwTerminateProcess body\n");
+    if (lastJumpCandidate) {
+        DbgPrint("[OpenSysKit] [Resolve#2] no call candidate found; last jump candidate=%p (not used automatically)\n", lastJumpCandidate);
+    } else {
+        DbgPrint("[OpenSysKit] [Resolve#2] no call or jump candidate found in ZwTerminateProcess body\n");
+    }
     return nullptr;
 }
 
