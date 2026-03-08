@@ -13,7 +13,7 @@
 //   EPROCESS.Token 是 EX_FAST_REF，指向进程访问令牌。
 //   替换该字段即可原地改变进程权限，无需重启。
 //
-// 三种级别实现方式：
+// 四种级别实现方式：
 //
 //   SYSTEM (Level=1)：
 //     直接复制 PsInitialSystemProcess（PID=4）的 Token。
@@ -29,6 +29,12 @@
 //     该服务进程名为 TrustedInstaller.exe，通过 ZwQuerySystemInformation
 //     遍历进程列表找到它，复制其 Token。
 //     若服务未运行则返回 STATUS_NOT_FOUND。
+//
+//   StandardUser (Level=3)：
+//     优先在目标进程同 Session 中查找 explorer.exe / ShellExperienceHost.exe /
+//     StartMenuExperienceHost.exe / SearchHost.exe / RuntimeBroker.exe，
+//     复制其 Token。这样通常可得到中完整性、非提权的普通用户 Token。
+//     若对应 Session 没有交互式用户壳进程，则返回 STATUS_NOT_FOUND。
 //
 // Token 字段偏移：
 //   动态扫描 PsReferencePrimaryToken 内 MOV RAX,[RCX+imm32]（48 8B 81）提取。
@@ -132,14 +138,53 @@ static VOID WriteToken(PEPROCESS process, ULONG_PTR token)
     *(PULONG_PTR)((PUCHAR)process + g_TokenOffset) = token;
 }
 
+static NTSTATUS GetProcessSessionIdByPid(
+    _In_ ULONG ProcessId,
+    _Out_ PULONG SessionId)
+{
+    *SessionId = 0;
+
+    ULONG bufSize = 0;
+    NTSTATUS status = ZwQuerySystemInformation(SystemProcessInformation, NULL, 0, &bufSize);
+    if (status != STATUS_INFO_LENGTH_MISMATCH) return status;
+
+    bufSize += 4096;
+    PVOID buf = ExAllocatePool2(POOL_FLAG_NON_PAGED, bufSize, 'koTk');
+    if (!buf) return STATUS_INSUFFICIENT_RESOURCES;
+
+    status = ZwQuerySystemInformation(SystemProcessInformation, buf, bufSize, &bufSize);
+    if (!NT_SUCCESS(status)) {
+        ExFreePoolWithTag(buf, 'koTk');
+        return status;
+    }
+
+    status = STATUS_NOT_FOUND;
+    PSYSTEM_PROCESS_INFO entry = (PSYSTEM_PROCESS_INFO)buf;
+
+    while (TRUE) {
+        if ((ULONG_PTR)entry->UniqueProcessId == (ULONG_PTR)ProcessId) {
+            *SessionId = entry->SessionId;
+            status = STATUS_SUCCESS;
+            break;
+        }
+
+        if (entry->NextEntryOffset == 0) break;
+        entry = (PSYSTEM_PROCESS_INFO)((PUCHAR)entry + entry->NextEntryOffset);
+    }
+
+    ExFreePoolWithTag(buf, 'koTk');
+    return status;
+}
+
 // ========== 按进程名查找 EPROCESS ==========
 //
 // 在系统进程列表中匹配 ImageName，返回第一个匹配项的 EPROCESS。
 // 调用者负责 ObDereferenceObject。
 //
 
-static NTSTATUS FindProcessByName(
+static NTSTATUS FindProcessByNameInternal(
     _In_  PCWSTR   targetName,
+    _In_opt_ PULONG SessionId,
     _Out_ PEPROCESS* outProcess)
 {
     *outProcess = nullptr;
@@ -166,7 +211,8 @@ static NTSTATUS FindProcessByName(
 
     while (TRUE) {
         if (entry->ImageName.Buffer && entry->UniqueProcessId != 0) {
-            if (RtlEqualUnicodeString(&entry->ImageName, &target, TRUE)) {
+            if (RtlEqualUnicodeString(&entry->ImageName, &target, TRUE) &&
+                (SessionId == nullptr || entry->SessionId == *SessionId)) {
                 PEPROCESS proc = nullptr;
                 NTSTATUS s = PsLookupProcessByProcessId(entry->UniqueProcessId, &proc);
                 if (NT_SUCCESS(s)) {
@@ -182,6 +228,21 @@ static NTSTATUS FindProcessByName(
 
     ExFreePoolWithTag(buf, 'koTk');
     return status;
+}
+
+static NTSTATUS FindProcessByName(
+    _In_  PCWSTR   targetName,
+    _Out_ PEPROCESS* outProcess)
+{
+    return FindProcessByNameInternal(targetName, nullptr, outProcess);
+}
+
+static NTSTATUS FindProcessByNameInSession(
+    _In_  PCWSTR   targetName,
+    _In_  ULONG    SessionId,
+    _Out_ PEPROCESS* outProcess)
+{
+    return FindProcessByNameInternal(targetName, &SessionId, outProcess);
 }
 
 // ========== 各级别 Token 来源 ==========
@@ -230,6 +291,45 @@ static NTSTATUS GetTrustedInstallerToken(_Out_ ULONG_PTR* token)
     return STATUS_SUCCESS;
 }
 
+// Level 3: StandardUser — 优先取目标进程同 Session 的用户态 Shell Token
+static NTSTATUS GetStandardUserToken(
+    _In_ ULONG TargetProcessId,
+    _Out_ ULONG_PTR* token)
+{
+    static const PCWSTR kCandidateNames[] = {
+        L"explorer.exe",
+        L"ShellExperienceHost.exe",
+        L"StartMenuExperienceHost.exe",
+        L"SearchHost.exe",
+        L"RuntimeBroker.exe",
+    };
+
+    ULONG sessionId = 0;
+    NTSTATUS status = GetProcessSessionIdByPid(TargetProcessId, &sessionId);
+    if (!NT_SUCCESS(status)) {
+        DbgPrint("[OpenSysKit] [Token] User: query session for PID=%lu failed: 0x%08X\n",
+            TargetProcessId, status);
+        return status;
+    }
+
+    for (ULONG i = 0; i < RTL_NUMBER_OF(kCandidateNames); ++i) {
+        PEPROCESS proc = nullptr;
+        status = FindProcessByNameInSession(kCandidateNames[i], sessionId, &proc);
+        if (!NT_SUCCESS(status)) {
+            continue;
+        }
+
+        *token = ReadToken(proc);
+        DbgPrint("[OpenSysKit] [Token] User: source=%ws session=%lu\n",
+            kCandidateNames[i], sessionId);
+        ObDereferenceObject(proc);
+        return STATUS_SUCCESS;
+    }
+
+    DbgPrint("[OpenSysKit] [Token] User: no shell token source found in session=%lu\n", sessionId);
+    return STATUS_NOT_FOUND;
+}
+
 // ========== 公开接口 ==========
 
 NTSTATUS ProcessElevate(ULONG ProcessId, ULONG Level)
@@ -260,6 +360,10 @@ NTSTATUS ProcessElevate(ULONG ProcessId, ULONG Level)
     case ELEVATE_LEVEL_TRUSTED_INSTALLER:
         DbgPrint("[OpenSysKit] [Token] PID=%lu -> TrustedInstaller\n", ProcessId);
         status = GetTrustedInstallerToken(&sourceToken);
+        break;
+    case ELEVATE_LEVEL_STANDARD_USER:
+        DbgPrint("[OpenSysKit] [Token] PID=%lu -> StandardUser\n", ProcessId);
+        status = GetStandardUserToken(ProcessId, &sourceToken);
         break;
     default:
         DbgPrint("[OpenSysKit] [Token] unknown Level=%lu\n", Level);

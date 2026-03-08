@@ -76,6 +76,7 @@ typedef struct _FILE_PATH_REQUEST {
 #define ELEVATE_LEVEL_ADMIN            0   // 本地管理员（Administrators 组）
 #define ELEVATE_LEVEL_SYSTEM           1   // NT AUTHORITY\SYSTEM
 #define ELEVATE_LEVEL_TRUSTED_INSTALLER 2  // NT SERVICE\TrustedInstaller
+#define ELEVATE_LEVEL_STANDARD_USER    3   // 普通用户（同 Session 用户态 Shell Token）
 
 typedef struct _PROCESS_ELEVATE_REQUEST {
     ULONG ProcessId;
