@@ -1,3 +1,4 @@
+
 cmake_minimum_required(VERSION 3.16)
 project(OpenSysKitDriver C CXX)
 
@@ -8,6 +9,7 @@ wdk_add_driver(OpenSysKit
     src/driver.cpp
     src/process.cpp
     src/protect.cpp
+    src/token.cpp
 )
 
 target_include_directories(OpenSysKit PRIVATE src)

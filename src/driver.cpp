@@ -1,6 +1,7 @@
 #include "driver.h"
 #include "process.h"
 #include "protect.h"
+#include "token.h"
 
 DRIVER_CONTEXT g_DriverContext = { 0 };
 
@@ -85,6 +86,17 @@ static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             break;
         }
         status = ProcessUnprotect(((PPROCESS_REQUEST)inBuf)->ProcessId);
+        break;
+
+    case IOCTL_ELEVATE_PROCESS:
+        if (inLen < sizeof(PROCESS_ELEVATE_REQUEST)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        {
+            PPROCESS_ELEVATE_REQUEST req = (PPROCESS_ELEVATE_REQUEST)inBuf;
+            status = ProcessElevate(req->ProcessId, req->Level);
+        }
         break;
 
     default:
