@@ -6,11 +6,7 @@
 #endif
 
 #include <ntifs.h>
-#include <intrin.h>
 #include "token.h"
-
-#pragma intrinsic(_InterlockedExchange)
-#pragma intrinsic(_InterlockedExchange64)
 
 typedef NTSTATUS (NTAPI* PFN_EX_ALLOCATE_LOCALLY_UNIQUE_ID)(
     _Out_ PLUID Luid
@@ -45,15 +41,14 @@ static __forceinline PVOID AtomicExchangePointerValue(
     _Inout_ volatile PVOID* target,
     _In_ PVOID value)
 {
-#if defined(_WIN64)
-    return (PVOID)_InterlockedExchange64(
-        (volatile LONG64*)target,
-        (LONG64)value);
-#else
-    return (PVOID)(ULONG_PTR)_InterlockedExchange(
-        (volatile LONG*)target,
-        (LONG)(ULONG_PTR)value);
-#endif
+    PVOID oldValue;
+    do {
+        oldValue = *(volatile PVOID*)target;
+    } while (InterlockedCompareExchangePointer(
+        (PVOID*)target,
+        value,
+        oldValue) != oldValue);
+    return oldValue;
 }
 
 // ========== 系统进程信息结构 ==========
