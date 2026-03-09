@@ -74,31 +74,26 @@ static VOID QueryObjectName(
 }
 
 static VOID QueryObjectTypeName(
-    _In_  PVOID  Object,
+    _In_  UCHAR  ObjectTypeIndex,
     _Out_ PWCHAR TypeBuf,
     _In_  ULONG  TypeBufChars)
 {
+    WCHAR digits[4];
+    ULONG digitCount = 0;
+
     RtlZeroMemory(TypeBuf, TypeBufChars * sizeof(WCHAR));
+    if (TypeBufChars <= RTL_NUMBER_OF(L"TypeIndex#"))
+        return;
 
-    POBJECT_TYPE objType = ObGetObjectType(Object);
-    if (!objType) return;
+    RtlCopyMemory(TypeBuf, L"TypeIndex#", (RTL_NUMBER_OF(L"TypeIndex#") - 1) * sizeof(WCHAR));
 
-    // OBJECT_TYPE 内 Name 字段偏移在各版本一致（0x10）
-    // 用公开的 ObGetObjectType 已经够了，类型名在对象类型结构里
-    // 这里用一个简单可靠的方法：通过对象类型索引对应的已知名称
-    // 直接查询 OBJECT_TYPE 内的 Name（UNICODE_STRING，偏移 0x10）
-    UNICODE_STRING* typeName = (UNICODE_STRING*)((PUCHAR)objType + 0x10);
+    do {
+        digits[digitCount++] = (WCHAR)(L'0' + (ObjectTypeIndex % 10));
+        ObjectTypeIndex /= 10;
+    } while (ObjectTypeIndex != 0 && digitCount < RTL_NUMBER_OF(digits));
 
-    __try {
-        ProbeForRead(typeName, sizeof(UNICODE_STRING), 1);
-        if (typeName->Buffer && typeName->Length > 0) {
-            USHORT copyLen = min(typeName->Length,
-                (USHORT)((TypeBufChars - 1) * sizeof(WCHAR)));
-            ProbeForRead(typeName->Buffer, typeName->Length, 1);
-            RtlCopyMemory(TypeBuf, typeName->Buffer, copyLen);
-        }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    for (ULONG i = 0; i < digitCount; ++i)
+        TypeBuf[10 + i] = digits[digitCount - 1 - i];
 }
 
 // ========== 公开接口 ==========
@@ -150,7 +145,7 @@ NTSTATUS EnumHandles(
 
         // 查询类型名和对象名（Object 是内核地址，直接使用）
         __try {
-            QueryObjectTypeName(entry->Object, outEntry->TypeName,
+            QueryObjectTypeName(entry->ObjectTypeIndex, outEntry->TypeName,
                 RTL_NUMBER_OF(outEntry->TypeName));
             QueryObjectName(entry->Object, outEntry->ObjectName,
                 RTL_NUMBER_OF(outEntry->ObjectName));
