@@ -8,9 +8,9 @@
 #include <ntifs.h>
 #include "threads.h"
 
-extern "C" PETHREAD NTAPI PsGetNextProcessThread(
-    _In_     PEPROCESS Process,
-    _In_opt_ PETHREAD  Thread
+typedef PETHREAD (NTAPI* PFN_PS_GET_NEXT_PROCESS_THREAD)(
+    _In_ PEPROCESS Process,
+    _In_opt_ PETHREAD Thread
 );
 
 typedef PVOID (NTAPI* PFN_PS_GET_THREAD_WIN32_START_ADDRESS)(
@@ -33,6 +33,22 @@ static PFN_PS_GET_THREAD_WIN32_START_ADDRESS ResolvePsGetThreadWin32StartAddress
     return s_PsGetThreadWin32StartAddress;
 }
 
+static PFN_PS_GET_NEXT_PROCESS_THREAD ResolvePsGetNextProcessThread()
+{
+    static PFN_PS_GET_NEXT_PROCESS_THREAD s_PsGetNextProcessThread = nullptr;
+    static BOOLEAN s_Resolved = FALSE;
+
+    if (!s_Resolved) {
+        UNICODE_STRING routineName;
+        RtlInitUnicodeString(&routineName, L"PsGetNextProcessThread");
+        s_PsGetNextProcessThread =
+            (PFN_PS_GET_NEXT_PROCESS_THREAD)MmGetSystemRoutineAddress(&routineName);
+        s_Resolved = TRUE;
+    }
+
+    return s_PsGetNextProcessThread;
+}
+
 // ========== 线程枚举 ==========
 //
 // 通过 PsGetNextProcessThread 遍历进程所有线程，
@@ -52,9 +68,13 @@ NTSTATUS ProcessEnumThreads(
     *BytesWritten = 0;
     PFN_PS_GET_THREAD_WIN32_START_ADDRESS getThreadWin32StartAddress =
         ResolvePsGetThreadWin32StartAddress();
+    PFN_PS_GET_NEXT_PROCESS_THREAD getNextProcessThread = ResolvePsGetNextProcessThread();
 
     if (OutputBufferSize < sizeof(THREAD_LIST_HEADER))
         return STATUS_BUFFER_TOO_SMALL;
+
+    if (!getNextProcessThread)
+        return STATUS_PROCEDURE_NOT_FOUND;
 
     PEPROCESS process = nullptr;
     NTSTATUS status = PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)ProcessId, &process);
@@ -65,7 +85,7 @@ NTSTATUS ProcessEnumThreads(
     ULONG maxEntries = (OutputBufferSize - sizeof(THREAD_LIST_HEADER)) / sizeof(THREAD_INFO);
     ULONG count = 0;
 
-    PETHREAD thread = PsGetNextProcessThread(process, NULL);
+    PETHREAD thread = getNextProcessThread(process, NULL);
     while (thread != NULL && count < maxEntries) {
         outEntry->ThreadId      = (ULONG)(ULONG_PTR)PsGetThreadId(thread);
         outEntry->ProcessId     = ProcessId;
@@ -78,14 +98,14 @@ NTSTATUS ProcessEnumThreads(
         count++;
         outEntry++;
 
-        PETHREAD next = PsGetNextProcessThread(process, thread);
+        PETHREAD next = getNextProcessThread(process, thread);
         ObDereferenceObject(thread);
         thread = next;
     }
 
     // 释放剩余未处理的引用
     while (thread) {
-        PETHREAD next = PsGetNextProcessThread(process, thread);
+        PETHREAD next = getNextProcessThread(process, thread);
         ObDereferenceObject(thread);
         thread = next;
     }

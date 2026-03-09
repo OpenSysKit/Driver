@@ -8,21 +8,66 @@
 #include <ntifs.h>
 #include "freeze.h"
 
-// PsSuspendThread / PsResumeThread 未在公开头文件中导出
-extern "C" NTSTATUS NTAPI PsSuspendThread(
-    _In_  PETHREAD Thread,
+typedef NTSTATUS (NTAPI* PFN_PS_SUSPEND_THREAD)(
+    _In_ PETHREAD Thread,
     _Out_opt_ PULONG PreviousSuspendCount
 );
 
-extern "C" NTSTATUS NTAPI PsResumeThread(
-    _In_  PETHREAD Thread,
+typedef NTSTATUS (NTAPI* PFN_PS_RESUME_THREAD)(
+    _In_ PETHREAD Thread,
     _Out_opt_ PULONG PreviousSuspendCount
 );
 
-extern "C" PETHREAD NTAPI PsGetNextProcessThread(
-    _In_     PEPROCESS Process,
-    _In_opt_ PETHREAD  Thread
+typedef PETHREAD (NTAPI* PFN_PS_GET_NEXT_PROCESS_THREAD)(
+    _In_ PEPROCESS Process,
+    _In_opt_ PETHREAD Thread
 );
+
+static PFN_PS_SUSPEND_THREAD ResolvePsSuspendThread()
+{
+    static PFN_PS_SUSPEND_THREAD s_PsSuspendThread = nullptr;
+    static BOOLEAN s_Resolved = FALSE;
+
+    if (!s_Resolved) {
+        UNICODE_STRING routineName;
+        RtlInitUnicodeString(&routineName, L"PsSuspendThread");
+        s_PsSuspendThread = (PFN_PS_SUSPEND_THREAD)MmGetSystemRoutineAddress(&routineName);
+        s_Resolved = TRUE;
+    }
+
+    return s_PsSuspendThread;
+}
+
+static PFN_PS_RESUME_THREAD ResolvePsResumeThread()
+{
+    static PFN_PS_RESUME_THREAD s_PsResumeThread = nullptr;
+    static BOOLEAN s_Resolved = FALSE;
+
+    if (!s_Resolved) {
+        UNICODE_STRING routineName;
+        RtlInitUnicodeString(&routineName, L"PsResumeThread");
+        s_PsResumeThread = (PFN_PS_RESUME_THREAD)MmGetSystemRoutineAddress(&routineName);
+        s_Resolved = TRUE;
+    }
+
+    return s_PsResumeThread;
+}
+
+static PFN_PS_GET_NEXT_PROCESS_THREAD ResolvePsGetNextProcessThread()
+{
+    static PFN_PS_GET_NEXT_PROCESS_THREAD s_PsGetNextProcessThread = nullptr;
+    static BOOLEAN s_Resolved = FALSE;
+
+    if (!s_Resolved) {
+        UNICODE_STRING routineName;
+        RtlInitUnicodeString(&routineName, L"PsGetNextProcessThread");
+        s_PsGetNextProcessThread =
+            (PFN_PS_GET_NEXT_PROCESS_THREAD)MmGetSystemRoutineAddress(&routineName);
+        s_Resolved = TRUE;
+    }
+
+    return s_PsGetNextProcessThread;
+}
 
 // ========== 公开接口 ==========
 //
@@ -32,6 +77,13 @@ extern "C" PETHREAD NTAPI PsGetNextProcessThread(
 
 static NTSTATUS FreezeUnfreezeProcess(ULONG ProcessId, BOOLEAN freeze)
 {
+    PFN_PS_GET_NEXT_PROCESS_THREAD getNextProcessThread = ResolvePsGetNextProcessThread();
+    PFN_PS_SUSPEND_THREAD suspendThread = ResolvePsSuspendThread();
+    PFN_PS_RESUME_THREAD resumeThread = ResolvePsResumeThread();
+
+    if (!getNextProcessThread || (freeze && !suspendThread) || (!freeze && !resumeThread))
+        return STATUS_PROCEDURE_NOT_FOUND;
+
     if (ProcessId == 0 || ProcessId == 4) return STATUS_ACCESS_DENIED;
 
     PEPROCESS process = nullptr;
@@ -39,13 +91,13 @@ static NTSTATUS FreezeUnfreezeProcess(ULONG ProcessId, BOOLEAN freeze)
     if (!NT_SUCCESS(status)) return status;
 
     ULONG count = 0;
-    PETHREAD thread = PsGetNextProcessThread(process, NULL);
+    PETHREAD thread = getNextProcessThread(process, NULL);
     while (thread != NULL) {
         __try {
             if (freeze)
-                PsSuspendThread(thread, NULL);
+                suspendThread(thread, NULL);
             else
-                PsResumeThread(thread, NULL);
+                resumeThread(thread, NULL);
             count++;
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -53,7 +105,7 @@ static NTSTATUS FreezeUnfreezeProcess(ULONG ProcessId, BOOLEAN freeze)
                 thread, GetExceptionCode());
         }
 
-        PETHREAD next = PsGetNextProcessThread(process, thread);
+        PETHREAD next = getNextProcessThread(process, thread);
         ObDereferenceObject(thread);
         thread = next;
     }

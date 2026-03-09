@@ -22,9 +22,9 @@
 //       不代表 DLL 已加载完成。
 //
 
-extern "C" PETHREAD NTAPI PsGetNextProcessThread(
-    _In_     PEPROCESS Process,
-    _In_opt_ PETHREAD  Thread
+typedef PETHREAD (NTAPI* PFN_PS_GET_NEXT_PROCESS_THREAD)(
+    _In_ PEPROCESS Process,
+    _In_opt_ PETHREAD Thread
 );
 
 typedef VOID (NTAPI* POSK_NORMAL_ROUTINE)(
@@ -87,6 +87,22 @@ static PFN_PS_GET_PROCESS_PEB ResolvePsGetProcessPeb()
     }
 
     return s_PsGetProcessPeb;
+}
+
+static PFN_PS_GET_NEXT_PROCESS_THREAD ResolvePsGetNextProcessThread()
+{
+    static PFN_PS_GET_NEXT_PROCESS_THREAD s_PsGetNextProcessThread = nullptr;
+    static BOOLEAN s_Resolved = FALSE;
+
+    if (!s_Resolved) {
+        UNICODE_STRING routineName;
+        RtlInitUnicodeString(&routineName, L"PsGetNextProcessThread");
+        s_PsGetNextProcessThread =
+            (PFN_PS_GET_NEXT_PROCESS_THREAD)MmGetSystemRoutineAddress(&routineName);
+        s_Resolved = TRUE;
+    }
+
+    return s_PsGetNextProcessThread;
 }
 
 // APC 内核例程：APC 触发或被撤销时由内核调用，负责释放 APC 对象
@@ -242,7 +258,13 @@ NTSTATUS InjectDll(ULONG ProcessId, PCWSTR DllPath)
 
     // 向目标进程的第一个非终止线程排队用户 APC
     BOOLEAN injected = FALSE;
-    PETHREAD thread = PsGetNextProcessThread(process, NULL);
+    PFN_PS_GET_NEXT_PROCESS_THREAD getNextProcessThread = ResolvePsGetNextProcessThread();
+    if (!getNextProcessThread) {
+        ObDereferenceObject(process);
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    PETHREAD thread = getNextProcessThread(process, NULL);
 
     while (thread != NULL) {
         if (!PsIsThreadTerminating(thread)) {
@@ -263,7 +285,7 @@ NTSTATUS InjectDll(ULONG ProcessId, PCWSTR DllPath)
                     DbgPrint("[OpenSysKit] [Inject] APC queued TID=%lu\n",
                         (ULONG)(ULONG_PTR)PsGetThreadId(thread));
                     injected = TRUE;
-                    PETHREAD next = PsGetNextProcessThread(process, thread);
+                    PETHREAD next = getNextProcessThread(process, thread);
                     ObDereferenceObject(thread);
                     thread = next;
                     break;
@@ -273,13 +295,13 @@ NTSTATUS InjectDll(ULONG ProcessId, PCWSTR DllPath)
             }
         }
 
-        PETHREAD next = PsGetNextProcessThread(process, thread);
+        PETHREAD next = getNextProcessThread(process, thread);
         ObDereferenceObject(thread);
         thread = next;
     }
 
     while (thread) {
-        PETHREAD next = PsGetNextProcessThread(process, thread);
+        PETHREAD next = getNextProcessThread(process, thread);
         ObDereferenceObject(thread);
         thread = next;
     }

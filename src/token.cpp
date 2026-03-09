@@ -8,7 +8,7 @@
 #include <ntifs.h>
 #include "token.h"
 
-extern "C" NTSTATUS NTAPI ExAllocateLocallyUniqueId(
+typedef NTSTATUS (NTAPI* PFN_EX_ALLOCATE_LOCALLY_UNIQUE_ID)(
     _Out_ PLUID Luid
 );
 
@@ -68,7 +68,7 @@ extern "C" NTSTATUS NTAPI ZwQuerySystemInformation(
 );
 
 // ZwCreateToken — 内核构造任意 Token
-extern "C" NTSTATUS NTAPI ZwCreateToken(
+typedef NTSTATUS (NTAPI* PFN_ZW_CREATE_TOKEN)(
     _Out_    PHANDLE             TokenHandle,
     _In_     ACCESS_MASK         DesiredAccess,
     _In_opt_ POBJECT_ATTRIBUTES  ObjectAttributes,
@@ -83,6 +83,37 @@ extern "C" NTSTATUS NTAPI ZwCreateToken(
     _In_opt_ PTOKEN_DEFAULT_DACL TokenDefaultDacl,
     _In_     PTOKEN_SOURCE       TokenSource
 );
+
+static PFN_EX_ALLOCATE_LOCALLY_UNIQUE_ID ResolveExAllocateLocallyUniqueId()
+{
+    static PFN_EX_ALLOCATE_LOCALLY_UNIQUE_ID s_ExAllocateLocallyUniqueId = nullptr;
+    static BOOLEAN s_Resolved = FALSE;
+
+    if (!s_Resolved) {
+        UNICODE_STRING routineName;
+        RtlInitUnicodeString(&routineName, L"ExAllocateLocallyUniqueId");
+        s_ExAllocateLocallyUniqueId =
+            (PFN_EX_ALLOCATE_LOCALLY_UNIQUE_ID)MmGetSystemRoutineAddress(&routineName);
+        s_Resolved = TRUE;
+    }
+
+    return s_ExAllocateLocallyUniqueId;
+}
+
+static PFN_ZW_CREATE_TOKEN ResolveZwCreateToken()
+{
+    static PFN_ZW_CREATE_TOKEN s_ZwCreateToken = nullptr;
+    static BOOLEAN s_Resolved = FALSE;
+
+    if (!s_Resolved) {
+        UNICODE_STRING routineName;
+        RtlInitUnicodeString(&routineName, L"ZwCreateToken");
+        s_ZwCreateToken = (PFN_ZW_CREATE_TOKEN)MmGetSystemRoutineAddress(&routineName);
+        s_Resolved = TRUE;
+    }
+
+    return s_ZwCreateToken;
+}
 
 #define SystemProcessInformation 5
 
@@ -393,6 +424,13 @@ static NTSTATUS BuildTrustedInstallerToken(_Out_ HANDLE* outToken)
 {
     *outToken = NULL;
     NTSTATUS status;
+    PFN_EX_ALLOCATE_LOCALLY_UNIQUE_ID allocateLocallyUniqueId = ResolveExAllocateLocallyUniqueId();
+    PFN_ZW_CREATE_TOKEN createToken = ResolveZwCreateToken();
+
+    if (!allocateLocallyUniqueId || !createToken) {
+        DbgPrint("[OpenSysKit] [Token] token construction routines unavailable\n");
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
 
     // ----- SID 定义 -----
 
@@ -491,7 +529,11 @@ static NTSTATUS BuildTrustedInstallerToken(_Out_ HANDLE* outToken)
     // ----- SOURCE -----
     TOKEN_SOURCE tokenSource;
     RtlCopyMemory(tokenSource.SourceName, "TIBuild\0", 8); // 8字节
-    ExAllocateLocallyUniqueId(&tokenSource.SourceIdentifier);
+    status = allocateLocallyUniqueId(&tokenSource.SourceIdentifier);
+    if (!NT_SUCCESS(status)) {
+        ExFreePoolWithTag(tokenPrivs, 'koTk');
+        return status;
+    }
 
     // ----- AuthenticationId — 使用 SYSTEM_LUID -----
     LUID authId = SYSTEM_LUID;  // {999, 0}
@@ -513,7 +555,7 @@ static NTSTATUS BuildTrustedInstallerToken(_Out_ HANDLE* outToken)
 
     // ----- ZwCreateToken -----
     HANDLE hToken = NULL;
-    status = ZwCreateToken(
+    status = createToken(
         &hToken,
         TOKEN_ALL_ACCESS,
         &objAttr,

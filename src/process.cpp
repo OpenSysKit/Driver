@@ -24,9 +24,9 @@ extern "C" NTSTATUS NTAPI ZwQueryInformationProcess(
 );
 
 // 精准遍历指定进程的所有线程，返回线程持有引用，调用方须 ObDereferenceObject
-extern "C" PETHREAD NTAPI PsGetNextProcessThread(
-    _In_     PEPROCESS Process,
-    _In_opt_ PETHREAD  Thread
+typedef PETHREAD (NTAPI* PFN_PS_GET_NEXT_PROCESS_THREAD)(
+    _In_ PEPROCESS Process,
+    _In_opt_ PETHREAD Thread
 );
 
 #define SystemProcessInformation        5
@@ -49,6 +49,22 @@ typedef NTSTATUS(__fastcall* PFN_PSP_TERMINATE_THREAD)(
 );
 
 static PFN_PSP_TERMINATE_THREAD g_PspTerminateThread = nullptr;
+
+static PFN_PS_GET_NEXT_PROCESS_THREAD ResolvePsGetNextProcessThread()
+{
+    static PFN_PS_GET_NEXT_PROCESS_THREAD s_PsGetNextProcessThread = nullptr;
+    static BOOLEAN s_Resolved = FALSE;
+
+    if (!s_Resolved) {
+        UNICODE_STRING routineName;
+        RtlInitUnicodeString(&routineName, L"PsGetNextProcessThread");
+        s_PsGetNextProcessThread =
+            (PFN_PS_GET_NEXT_PROCESS_THREAD)MmGetSystemRoutineAddress(&routineName);
+        s_Resolved = TRUE;
+    }
+
+    return s_PsGetNextProcessThread;
+}
 
 static PVOID SearchPattern(
     _In_ PVOID  pStart,
@@ -247,7 +263,9 @@ NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
     }
 
     // 路径 1：PspTerminateThreadByPointer
-    if (g_PspTerminateThread) {
+    PFN_PS_GET_NEXT_PROCESS_THREAD getNextProcessThread = ResolvePsGetNextProcessThread();
+
+    if (g_PspTerminateThread && getNextProcessThread) {
         PEPROCESS pTargetProcess = nullptr;
         NTSTATUS status = PsLookupProcessByProcessId(
             (HANDLE)(ULONG_PTR)ProcessId, &pTargetProcess);
@@ -257,7 +275,7 @@ NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
         }
 
         ULONG killedThreads = 0;
-        PETHREAD pThread = PsGetNextProcessThread(pTargetProcess, NULL);
+        PETHREAD pThread = getNextProcessThread(pTargetProcess, NULL);
         while (pThread != NULL) {
             __try {
                 NTSTATUS killStatus = g_PspTerminateThread(pThread, 0, TRUE);
@@ -267,7 +285,7 @@ NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
                 DbgPrint("[OpenSysKit] exception on thread %p: 0x%08X\n",
                     pThread, GetExceptionCode());
             }
-            PETHREAD pNext = PsGetNextProcessThread(pTargetProcess, pThread);
+            PETHREAD pNext = getNextProcessThread(pTargetProcess, pThread);
             ObDereferenceObject(pThread);
             pThread = pNext;
         }

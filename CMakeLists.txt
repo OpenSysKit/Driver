@@ -8,7 +8,12 @@ find_package(WDK REQUIRED)
 wdk_add_driver(OpenSysKit
     src/driver.cpp
     src/dkom.cpp
+    src/freeze.cpp
+    src/handle.cpp
     src/inject.cpp
+    src/kernelmod.cpp
+    src/memory.cpp
+    src/network.cpp
     src/process.cpp
     src/protect.cpp
     src/threads.cpp

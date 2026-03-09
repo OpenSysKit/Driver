@@ -10,26 +10,54 @@
 
 // ========== 内核模块枚举 ==========
 //
-// 遍历 PsLoadedModuleList（LDR_DATA_TABLE_ENTRY 链表）。
-// 持有 PsLoadedModuleResource 读锁保证遍历期间链表稳定，
-// 遍历完成后立即释放。
+// 通过 ZwQuerySystemInformation(SystemModuleInformation) 枚举内核模块，
+// 避免直接依赖 PsLoadedModuleList / PsLoadedModuleResource 这类未文档化数据导出。
 //
 
-extern "C" extern ERESOURCE PsLoadedModuleResource;
+extern "C" NTSTATUS NTAPI ZwQuerySystemInformation(
+    ULONG  SystemInformationClass,
+    PVOID  SystemInformation,
+    ULONG  SystemInformationLength,
+    PULONG ReturnLength
+);
 
-// LDR_DATA_TABLE_ENTRY 内核版（只取需要的字段）
-typedef struct _KLDR_DATA_TABLE_ENTRY_PARTIAL {
-    LIST_ENTRY     InLoadOrderLinks;
-    PVOID          ExceptionTable;
-    ULONG          ExceptionTableSize;
-    PVOID          GpValue;
-    PVOID          NonPagedDebugInfo;
-    PVOID          DllBase;
-    PVOID          EntryPoint;
-    ULONG          SizeOfImage;
-    UNICODE_STRING FullDllName;
-    UNICODE_STRING BaseDllName;
-} KLDR_DATA_TABLE_ENTRY_PARTIAL;
+#define SystemModuleInformation 11
+
+typedef struct _SYSTEM_MODULE_ENTRY {
+    HANDLE Section;
+    PVOID  MappedBase;
+    PVOID  ImageBase;
+    ULONG  ImageSize;
+    ULONG  Flags;
+    USHORT LoadOrderIndex;
+    USHORT InitOrderIndex;
+    USHORT LoadCount;
+    USHORT OffsetToFileName;
+    UCHAR  FullPathName[256];
+} SYSTEM_MODULE_ENTRY, *PSYSTEM_MODULE_ENTRY;
+
+typedef struct _SYSTEM_MODULE_INFORMATION_EX {
+    ULONG NumberOfModules;
+    SYSTEM_MODULE_ENTRY Modules[1];
+} SYSTEM_MODULE_INFORMATION_EX, *PSYSTEM_MODULE_INFORMATION_EX;
+
+static VOID CopyAnsiPathToWide(
+    _Out_writes_(dstCount) PWCHAR dst,
+    _In_ ULONG dstCount,
+    _In_reads_(srcCount) const UCHAR* src,
+    _In_ ULONG srcCount)
+{
+    ULONG limit = (dstCount > 0) ? dstCount - 1 : 0;
+    ULONG i = 0;
+
+    if (!dst || dstCount == 0)
+        return;
+
+    for (; i < srcCount && i < limit && src[i] != '\0'; ++i)
+        dst[i] = (WCHAR)src[i];
+
+    dst[i] = L'\0';
+}
 
 NTSTATUS EnumKernelModules(
     _Out_ PVOID  OutputBuffer,
@@ -41,47 +69,58 @@ NTSTATUS EnumKernelModules(
     if (OutputBufferSize < sizeof(KERNEL_MODULE_LIST_HEADER))
         return STATUS_BUFFER_TOO_SMALL;
 
+    ULONG bufSize = 0;
+    NTSTATUS status = ZwQuerySystemInformation(SystemModuleInformation, nullptr, 0, &bufSize);
+    if (status != STATUS_INFO_LENGTH_MISMATCH)
+        return status;
+
+    bufSize += 4096;
+    PSYSTEM_MODULE_INFORMATION_EX modules = (PSYSTEM_MODULE_INFORMATION_EX)
+        ExAllocatePool2(POOL_FLAG_NON_PAGED, bufSize, 'domK');
+    if (!modules)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    status = ZwQuerySystemInformation(SystemModuleInformation, modules, bufSize, &bufSize);
+    if (!NT_SUCCESS(status)) {
+        ExFreePoolWithTag(modules, 'domK');
+        return status;
+    }
+
     PKERNEL_MODULE_LIST_HEADER header = (PKERNEL_MODULE_LIST_HEADER)OutputBuffer;
     PKERNEL_MODULE_INFO outEntry =
         (PKERNEL_MODULE_INFO)((PUCHAR)OutputBuffer + sizeof(KERNEL_MODULE_LIST_HEADER));
     ULONG maxEntries =
         (OutputBufferSize - sizeof(KERNEL_MODULE_LIST_HEADER)) / sizeof(KERNEL_MODULE_INFO);
-
-    // 读锁保护链表遍历
-    ExAcquireResourceSharedLite(&PsLoadedModuleResource, TRUE);
-
     ULONG count = 0;
-    PLIST_ENTRY head = PsLoadedModuleList;
-    PLIST_ENTRY cur  = head->Flink;
 
-    while (cur != head && count < maxEntries) {
-        KLDR_DATA_TABLE_ENTRY_PARTIAL* entry =
-            CONTAINING_RECORD(cur, KLDR_DATA_TABLE_ENTRY_PARTIAL, InLoadOrderLinks);
+    for (ULONG i = 0; i < modules->NumberOfModules && count < maxEntries; ++i) {
+        SYSTEM_MODULE_ENTRY* entry = &modules->Modules[i];
+        ULONG fullPathLength = 0;
+        ULONG baseOffset = entry->OffsetToFileName;
 
-        outEntry->BaseAddress = (ULONG_PTR)entry->DllBase;
-        outEntry->SizeOfImage = entry->SizeOfImage;
+        while (fullPathLength < RTL_NUMBER_OF(entry->FullPathName) &&
+               entry->FullPathName[fullPathLength] != '\0') {
+            ++fullPathLength;
+        }
 
+        if (baseOffset > fullPathLength)
+            baseOffset = fullPathLength;
+
+        outEntry->BaseAddress = (ULONG_PTR)entry->ImageBase;
+        outEntry->SizeOfImage = entry->ImageSize;
         RtlZeroMemory(outEntry->FullPath, sizeof(outEntry->FullPath));
         RtlZeroMemory(outEntry->BaseName, sizeof(outEntry->BaseName));
 
-        if (entry->FullDllName.Buffer && entry->FullDllName.Length > 0) {
-            USHORT copyLen = min(entry->FullDllName.Length,
-                (USHORT)(sizeof(outEntry->FullPath) - sizeof(WCHAR)));
-            RtlCopyMemory(outEntry->FullPath, entry->FullDllName.Buffer, copyLen);
-        }
+        CopyAnsiPathToWide(outEntry->FullPath, RTL_NUMBER_OF(outEntry->FullPath),
+            entry->FullPathName, fullPathLength);
+        CopyAnsiPathToWide(outEntry->BaseName, RTL_NUMBER_OF(outEntry->BaseName),
+            entry->FullPathName + baseOffset, fullPathLength - baseOffset);
 
-        if (entry->BaseDllName.Buffer && entry->BaseDllName.Length > 0) {
-            USHORT copyLen = min(entry->BaseDllName.Length,
-                (USHORT)(sizeof(outEntry->BaseName) - sizeof(WCHAR)));
-            RtlCopyMemory(outEntry->BaseName, entry->BaseDllName.Buffer, copyLen);
-        }
-
-        count++;
-        outEntry++;
-        cur = cur->Flink;
+        ++count;
+        ++outEntry;
     }
 
-    ExReleaseResourceLite(&PsLoadedModuleResource);
+    ExFreePoolWithTag(modules, 'domK');
 
     header->Count     = count;
     header->TotalSize = sizeof(KERNEL_MODULE_LIST_HEADER) + count * sizeof(KERNEL_MODULE_INFO);

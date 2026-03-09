@@ -8,6 +8,25 @@
 #include <ntifs.h>
 #include "memory.h"
 
+typedef PVOID (NTAPI* PFN_PS_GET_PROCESS_PEB)(
+    _In_ PEPROCESS Process
+);
+
+static PFN_PS_GET_PROCESS_PEB ResolvePsGetProcessPeb()
+{
+    static PFN_PS_GET_PROCESS_PEB s_PsGetProcessPeb = nullptr;
+    static BOOLEAN s_Resolved = FALSE;
+
+    if (!s_Resolved) {
+        UNICODE_STRING routineName;
+        RtlInitUnicodeString(&routineName, L"PsGetProcessPeb");
+        s_PsGetProcessPeb = (PFN_PS_GET_PROCESS_PEB)MmGetSystemRoutineAddress(&routineName);
+        s_Resolved = TRUE;
+    }
+
+    return s_PsGetProcessPeb;
+}
+
 // ========== 进程内存读写 ==========
 //
 // MmCopyVirtualMemory 是未导出函数，通过 MmGetSystemRoutineAddress 无法获取，
@@ -121,7 +140,11 @@ NTSTATUS ProcessEnumModules(
     _In_  ULONG  OutputBufferSize,
     _Out_ PULONG BytesWritten)
 {
+    PFN_PS_GET_PROCESS_PEB getProcessPeb = ResolvePsGetProcessPeb();
     *BytesWritten = 0;
+
+    if (!getProcessPeb)
+        return STATUS_PROCEDURE_NOT_FOUND;
 
     if (OutputBufferSize < sizeof(MODULE_LIST_HEADER))
         return STATUS_BUFFER_TOO_SMALL;
@@ -140,7 +163,7 @@ NTSTATUS ProcessEnumModules(
 
     __try {
         // 从 EPROCESS 取 PEB（PsGetProcessPeb 是未导出函数，用偏移读取）
-        PVOID pPeb = PsGetProcessPeb(process);
+        PVOID pPeb = getProcessPeb(process);
         if (!pPeb) {
             status = STATUS_UNSUCCESSFUL;
             __leave;
