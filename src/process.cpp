@@ -72,9 +72,6 @@ VOID ResolvePspTerminateProcess()
 {
     g_PspTerminateThread = nullptr;
 
-    // Win10/11 x64 固定特征码 E9
-    UCHAR pattern = 0xE9;
-
     UNICODE_STRING funcName;
     RtlInitUnicodeString(&funcName, L"PsTerminateSystemThread");
     PVOID pPsTerminateSystemThread = MmGetSystemRoutineAddress(&funcName);
@@ -85,13 +82,24 @@ VOID ResolvePspTerminateProcess()
 
     DbgPrint("[OpenSysKit] [Resolve] PsTerminateSystemThread=%p\n", pPsTerminateSystemThread);
 
-    PVOID pRelOffset = SearchMemory(
-        pPsTerminateSystemThread,
-        (PVOID)((PUCHAR)pPsTerminateSystemThread + 0xFF),
-        &pattern, 1
-    );
+    PVOID pEnd = (PVOID)((PUCHAR)pPsTerminateSystemThread + 0xFF);
+
+    // 先尝试 E9（jmp），再尝试 E8（call）
+    UCHAR patternE9 = 0xE9;
+    UCHAR patternE8 = 0xE8;
+
+    PVOID pRelOffset = SearchMemory(pPsTerminateSystemThread, pEnd, &patternE9, 1);
+    if (pRelOffset) {
+        DbgPrint("[OpenSysKit] [Resolve] found E9\n");
+    } else {
+        pRelOffset = SearchMemory(pPsTerminateSystemThread, pEnd, &patternE8, 1);
+        if (pRelOffset) {
+            DbgPrint("[OpenSysKit] [Resolve] found E8\n");
+        }
+    }
+
     if (!pRelOffset) {
-        DbgPrint("[OpenSysKit] [Resolve] E9 not found in PsTerminateSystemThread\n");
+        DbgPrint("[OpenSysKit] [Resolve] neither E9 nor E8 found in PsTerminateSystemThread\n");
         return;
     }
 
