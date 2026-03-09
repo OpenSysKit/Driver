@@ -27,13 +27,38 @@ extern "C" PETHREAD NTAPI PsGetNextProcessThread(
     _In_opt_ PETHREAD  Thread
 );
 
+typedef VOID (NTAPI* POSK_NORMAL_ROUTINE)(
+    _In_opt_ PVOID NormalContext,
+    _In_opt_ PVOID SystemArgument1,
+    _In_opt_ PVOID SystemArgument2
+);
+
+typedef VOID (NTAPI* POSK_KERNEL_ROUTINE)(
+    _In_    PRKAPC               Apc,
+    _Inout_ POSK_NORMAL_ROUTINE* NormalRoutine,
+    _Inout_ PVOID*               NormalContext,
+    _Inout_ PVOID*               SystemArgument1,
+    _Inout_ PVOID*               SystemArgument2
+);
+
+typedef VOID (NTAPI* POSK_RUNDOWN_ROUTINE)(
+    _In_ PRKAPC Apc
+);
+
+typedef enum _OSK_APC_ENVIRONMENT {
+    OskOriginalApcEnvironment = 0,
+    OskAttachedApcEnvironment = 1,
+    OskCurrentApcEnvironment  = 2,
+    OskInsertApcEnvironment   = 3
+} OSK_APC_ENVIRONMENT;
+
 extern "C" VOID NTAPI KeInitializeApc(
     _Out_    PRKAPC             Apc,
     _In_     PRKTHREAD          Thread,
-    _In_     KAPC_ENVIRONMENT   Environment,
-    _In_     PKKERNEL_ROUTINE   KernelRoutine,
-    _In_opt_ PKRUNDOWN_ROUTINE  RundownRoutine,
-    _In_opt_ PKNORMAL_ROUTINE   NormalRoutine,
+    _In_     OSK_APC_ENVIRONMENT Environment,
+    _In_     POSK_KERNEL_ROUTINE KernelRoutine,
+    _In_opt_ POSK_RUNDOWN_ROUTINE RundownRoutine,
+    _In_opt_ POSK_NORMAL_ROUTINE NormalRoutine,
     _In_opt_ KPROCESSOR_MODE    ApcMode,
     _In_opt_ PVOID              NormalContext
 );
@@ -45,13 +70,32 @@ extern "C" BOOLEAN NTAPI KeInsertQueueApc(
     _In_     KPRIORITY Increment
 );
 
+typedef PVOID (NTAPI* PFN_PS_GET_PROCESS_PEB)(
+    _In_ PEPROCESS Process
+);
+
+static PFN_PS_GET_PROCESS_PEB ResolvePsGetProcessPeb()
+{
+    static PFN_PS_GET_PROCESS_PEB s_PsGetProcessPeb = nullptr;
+    static BOOLEAN s_Resolved = FALSE;
+
+    if (!s_Resolved) {
+        UNICODE_STRING routineName;
+        RtlInitUnicodeString(&routineName, L"PsGetProcessPeb");
+        s_PsGetProcessPeb = (PFN_PS_GET_PROCESS_PEB)MmGetSystemRoutineAddress(&routineName);
+        s_Resolved = TRUE;
+    }
+
+    return s_PsGetProcessPeb;
+}
+
 // APC 内核例程：APC 触发或被撤销时由内核调用，负责释放 APC 对象
 static VOID ApcKernelRoutine(
-    _In_    PRKAPC           Apc,
-    _Inout_ PKNORMAL_ROUTINE* NormalRoutine,
-    _Inout_ PVOID*           NormalContext,
-    _Inout_ PVOID*           SystemArgument1,
-    _Inout_ PVOID*           SystemArgument2)
+    _In_    PRKAPC              Apc,
+    _Inout_ POSK_NORMAL_ROUTINE* NormalRoutine,
+    _Inout_ PVOID*              NormalContext,
+    _Inout_ PVOID*              SystemArgument1,
+    _Inout_ PVOID*              SystemArgument2)
 {
     UNREFERENCED_PARAMETER(NormalRoutine);
     UNREFERENCED_PARAMETER(NormalContext);
@@ -64,9 +108,15 @@ static VOID ApcKernelRoutine(
 static PVOID FindLoadLibraryW_InAttached()
 {
     PVOID result = nullptr;
+    PFN_PS_GET_PROCESS_PEB getProcessPeb = ResolvePsGetProcessPeb();
+
+    if (!getProcessPeb) {
+        DbgPrint("[OpenSysKit] [Inject] PsGetProcessPeb unavailable\n");
+        return nullptr;
+    }
 
     __try {
-        PVOID pPeb = PsGetProcessPeb(PsGetCurrentProcess());
+        PVOID pPeb = getProcessPeb(PsGetCurrentProcess());
         if (!pPeb) __leave;
 
         ProbeForRead(pPeb, 0x20, 1);
@@ -201,10 +251,10 @@ NTSTATUS InjectDll(ULONG ProcessId, PCWSTR DllPath)
                 KeInitializeApc(
                     apc,
                     (PRKTHREAD)thread,
-                    OriginalApcEnvironment,
+                    OskOriginalApcEnvironment,
                     ApcKernelRoutine,
                     nullptr,
-                    (PKNORMAL_ROUTINE)loadLibW,  // 用户态 APC 例程 = LoadLibraryW
+                    (POSK_NORMAL_ROUTINE)loadLibW,  // 用户态 APC 例程 = LoadLibraryW
                     UserMode,
                     remoteBuf                    // 参数 = DLL 路径地址
                 );

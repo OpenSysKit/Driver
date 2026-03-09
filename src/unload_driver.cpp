@@ -20,6 +20,17 @@
 // 仅适用于通过 SC/ZwLoadDriver 加载的驱动，内置驱动卸载会失败。
 //
 
+extern "C" NTSTATUS NTAPI ObReferenceObjectByName(
+    _In_      PUNICODE_STRING ObjectName,
+    _In_      ULONG Attributes,
+    _In_opt_  PACCESS_STATE AccessState,
+    _In_opt_  ACCESS_MASK DesiredAccess,
+    _In_      POBJECT_TYPE ObjectType,
+    _In_      KPROCESSOR_MODE AccessMode,
+    _Inout_opt_ PVOID ParseContext,
+    _Out_     PVOID* Object
+);
+
 extern "C" extern POBJECT_TYPE* IoDriverObjectType;
 
 static VOID StripSysSuffix(PCWSTR src, PWSTR dst, ULONG dstChars)

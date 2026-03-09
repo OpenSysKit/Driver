@@ -78,25 +78,19 @@ VOID ResolvePspTerminateThread()
         return;
     }
 
-    UCHAR pattern = 0xE9;
-    PVOID pRelOffset = SearchPattern(
-        pBase,
-        (PVOID)((PUCHAR)pBase + 0xFF),
-        &pattern, 1);
+    DbgPrint("[OpenSysKit] [Resolve] PsTerminateSystemThread=%p\n", pBase);
 
-    DbgPrint("[OpenSysKit] [Resolve] PsTerminateSystemThread=%p\n", pPsTerminateSystemThread);
-
-    PVOID pEnd = (PVOID)((PUCHAR)pPsTerminateSystemThread + 0xFF);
+    PVOID pEnd = (PVOID)((PUCHAR)pBase + 0xFF);
 
     // 先尝试 E9（jmp），再尝试 E8（call）
     UCHAR patternE9 = 0xE9;
     UCHAR patternE8 = 0xE8;
 
-    PVOID pRelOffset = SearchMemory(pPsTerminateSystemThread, pEnd, &patternE9, 1);
+    PVOID pRelOffset = SearchPattern(pBase, pEnd, &patternE9, 1);
     if (pRelOffset) {
         DbgPrint("[OpenSysKit] [Resolve] found E9\n");
     } else {
-        pRelOffset = SearchMemory(pPsTerminateSystemThread, pEnd, &patternE8, 1);
+        pRelOffset = SearchPattern(pBase, pEnd, &patternE8, 1);
         if (pRelOffset) {
             DbgPrint("[OpenSysKit] [Resolve] found E8\n");
         }
@@ -331,14 +325,15 @@ NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
 // 入参须为 NT 绝对路径（\??\ 或 \Device\...），不接受 Win32 路径。
 //
 
-#define FileDispositionInformationEx            64
-#define FILE_DISPOSITION_DELETE                 0x00000001
-#define FILE_DISPOSITION_POSIX_SEMANTICS        0x00000002
+#ifndef FILE_DISPOSITION_DELETE
+#define FILE_DISPOSITION_DELETE 0x00000001
+#endif
+#ifndef FILE_DISPOSITION_POSIX_SEMANTICS
+#define FILE_DISPOSITION_POSIX_SEMANTICS 0x00000002
+#endif
+#ifndef FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE
 #define FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE 0x00000010
-
-typedef struct _FILE_DISPOSITION_INFORMATION_EX {
-    ULONG Flags;
-} FILE_DISPOSITION_INFORMATION_EX, *PFILE_DISPOSITION_INFORMATION_EX;
+#endif
 
 NTSTATUS FileDeleteKernel(PCWSTR Path)
 {

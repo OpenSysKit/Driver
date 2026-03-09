@@ -13,6 +13,26 @@ extern "C" PETHREAD NTAPI PsGetNextProcessThread(
     _In_opt_ PETHREAD  Thread
 );
 
+typedef PVOID (NTAPI* PFN_PS_GET_THREAD_WIN32_START_ADDRESS)(
+    _In_ PETHREAD Thread
+);
+
+static PFN_PS_GET_THREAD_WIN32_START_ADDRESS ResolvePsGetThreadWin32StartAddress()
+{
+    static PFN_PS_GET_THREAD_WIN32_START_ADDRESS s_PsGetThreadWin32StartAddress = nullptr;
+    static BOOLEAN s_Resolved = FALSE;
+
+    if (!s_Resolved) {
+        UNICODE_STRING routineName;
+        RtlInitUnicodeString(&routineName, L"PsGetThreadWin32StartAddress");
+        s_PsGetThreadWin32StartAddress =
+            (PFN_PS_GET_THREAD_WIN32_START_ADDRESS)MmGetSystemRoutineAddress(&routineName);
+        s_Resolved = TRUE;
+    }
+
+    return s_PsGetThreadWin32StartAddress;
+}
+
 // ========== 线程枚举 ==========
 //
 // 通过 PsGetNextProcessThread 遍历进程所有线程，
@@ -30,6 +50,8 @@ NTSTATUS ProcessEnumThreads(
     _Out_ PULONG BytesWritten)
 {
     *BytesWritten = 0;
+    PFN_PS_GET_THREAD_WIN32_START_ADDRESS getThreadWin32StartAddress =
+        ResolvePsGetThreadWin32StartAddress();
 
     if (OutputBufferSize < sizeof(THREAD_LIST_HEADER))
         return STATUS_BUFFER_TOO_SMALL;
@@ -48,7 +70,9 @@ NTSTATUS ProcessEnumThreads(
         outEntry->ThreadId      = (ULONG)(ULONG_PTR)PsGetThreadId(thread);
         outEntry->ProcessId     = ProcessId;
         outEntry->Priority      = (LONG)KeQueryPriorityThread(thread);
-        outEntry->StartAddress  = (ULONG64)PsGetThreadWin32StartAddress(thread);
+        outEntry->StartAddress  = getThreadWin32StartAddress
+            ? (ULONG64)getThreadWin32StartAddress(thread)
+            : 0;
         outEntry->IsTerminating = PsIsThreadTerminating(thread) ? TRUE : FALSE;
 
         count++;

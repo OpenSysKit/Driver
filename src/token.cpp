@@ -8,6 +8,29 @@
 #include <ntifs.h>
 #include "token.h"
 
+extern "C" NTSTATUS NTAPI ExAllocateLocallyUniqueId(
+    _Out_ PLUID Luid
+);
+
+#ifndef SE_GROUP_MANDATORY
+#define SE_GROUP_MANDATORY 0x00000001L
+#endif
+#ifndef SE_GROUP_ENABLED_BY_DEFAULT
+#define SE_GROUP_ENABLED_BY_DEFAULT 0x00000002L
+#endif
+#ifndef SE_GROUP_ENABLED
+#define SE_GROUP_ENABLED 0x00000004L
+#endif
+#ifndef SE_GROUP_OWNER
+#define SE_GROUP_OWNER 0x00000008L
+#endif
+#ifndef SE_GROUP_INTEGRITY
+#define SE_GROUP_INTEGRITY 0x00000020L
+#endif
+#ifndef SE_GROUP_INTEGRITY_ENABLED
+#define SE_GROUP_INTEGRITY_ENABLED 0x00000040L
+#endif
+
 
 // ========== EX_FAST_REF ==========
 #define EX_FAST_REF_MASK        ((ULONG_PTR)0xF)
@@ -330,15 +353,15 @@ static NTSTATUS ElevateToStandardUser(
 #pragma pack(push, 1)
 // 静态 SID 结构体（最多6个SubAuthority）
 typedef struct _SID_MAX6 {
-    BYTE  Revision;
-    BYTE  SubAuthorityCount;
+    UCHAR Revision;
+    UCHAR SubAuthorityCount;
     SID_IDENTIFIER_AUTHORITY IdentifierAuthority;
     ULONG SubAuthority[6];
 } SID_MAX6;
 #pragma pack(pop)
 
-static VOID InitSid(SID_MAX6* s, BYTE subCount,
-    BYTE ia0, BYTE ia1, BYTE ia2, BYTE ia3, BYTE ia4, BYTE ia5,
+static VOID InitSid(SID_MAX6* s, UCHAR subCount,
+    UCHAR ia0, UCHAR ia1, UCHAR ia2, UCHAR ia3, UCHAR ia4, UCHAR ia5,
     ...)
 {
     s->Revision = SID_REVISION;
@@ -351,7 +374,7 @@ static VOID InitSid(SID_MAX6* s, BYTE subCount,
     s->IdentifierAuthority.Value[5] = ia5;
     va_list args;
     va_start(args, ia5);
-    for (BYTE i = 0; i < subCount; i++)
+    for (UCHAR i = 0; i < subCount; i++)
         s->SubAuthority[i] = va_arg(args, ULONG);
     va_end(args);
 }

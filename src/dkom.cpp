@@ -123,12 +123,12 @@ NTSTATUS UnhideProcess(ULONG ProcessId)
     KIRQL irql;
     KeAcquireSpinLock(&g_HiddenLock, &irql);
 
-    ULONG idx = ULONG_MAX;
+    ULONG idx = MAXULONG;
     for (ULONG i = 0; i < g_HiddenCount; i++) {
         if (g_HiddenTable[i].ProcessId == ProcessId) { idx = i; break; }
     }
 
-    if (idx == ULONG_MAX) {
+    if (idx == MAXULONG) {
         KeReleaseSpinLock(&g_HiddenLock, irql);
         ObDereferenceObject(process);
         return STATUS_NOT_FOUND;
