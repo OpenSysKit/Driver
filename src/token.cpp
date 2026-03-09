@@ -37,6 +37,21 @@ typedef NTSTATUS (NTAPI* PFN_EX_ALLOCATE_LOCALLY_UNIQUE_ID)(
 #define EX_FAST_REF_REFCNT_MAX  ((ULONG_PTR)0xF)
 #define EXFASTREF_TO_PTR(r)     ((PVOID)((ULONG_PTR)(r) & ~EX_FAST_REF_MASK))
 
+static __forceinline PVOID AtomicExchangePointerValue(
+    _Inout_ volatile PVOID* target,
+    _In_ PVOID value)
+{
+#if defined(_WIN64)
+    return (PVOID)InterlockedExchange64(
+        (volatile LONG64*)target,
+        (LONG64)value);
+#else
+    return (PVOID)(ULONG_PTR)InterlockedExchange(
+        (volatile LONG*)target,
+        (LONG)(ULONG_PTR)value);
+#endif
+}
+
 // ========== 系统进程信息结构 ==========
 
 typedef struct _SYSTEM_PROCESS_INFO {
@@ -194,7 +209,7 @@ static NTSTATUS SwapProcessToken(
     ULONG_PTR newRef = (ULONG_PTR)srcToken | EX_FAST_REF_REFCNT_MAX;
 
     // 4. 原子替换，取回旧的 EX_FAST_REF
-    ULONG_PTR oldRef = (ULONG_PTR)InterlockedExchangePointer(
+    ULONG_PTR oldRef = (ULONG_PTR)AtomicExchangePointerValue(
         (PVOID*)((PUCHAR)targetProcess + g_TokenOffset),
         (PVOID)newRef);
 
@@ -635,7 +650,7 @@ static NTSTATUS ElevateToTrustedInstaller(_In_ PEPROCESS targetProcess)
     }
 
     ULONG_PTR newRef = (ULONG_PTR)tokenObj | EX_FAST_REF_REFCNT_MAX;
-    ULONG_PTR oldRef = (ULONG_PTR)InterlockedExchangePointer(
+    ULONG_PTR oldRef = (ULONG_PTR)AtomicExchangePointerValue(
         (PVOID*)((PUCHAR)targetProcess + g_TokenOffset),
         (PVOID)newRef);
 
