@@ -362,8 +362,10 @@ typedef struct _SID_MAX6 {
 
 static VOID InitSid(SID_MAX6* s, UCHAR subCount,
     UCHAR ia0, UCHAR ia1, UCHAR ia2, UCHAR ia3, UCHAR ia4, UCHAR ia5,
-    ...)
+    ULONG sa0, ULONG sa1, ULONG sa2, ULONG sa3, ULONG sa4, ULONG sa5)
 {
+    const ULONG subAuthorities[6] = { sa0, sa1, sa2, sa3, sa4, sa5 };
+
     s->Revision = SID_REVISION;
     s->SubAuthorityCount = subCount;
     s->IdentifierAuthority.Value[0] = ia0;
@@ -372,11 +374,10 @@ static VOID InitSid(SID_MAX6* s, UCHAR subCount,
     s->IdentifierAuthority.Value[3] = ia3;
     s->IdentifierAuthority.Value[4] = ia4;
     s->IdentifierAuthority.Value[5] = ia5;
-    va_list args;
-    va_start(args, ia5);
-    for (UCHAR i = 0; i < subCount; i++)
-        s->SubAuthority[i] = va_arg(args, ULONG);
-    va_end(args);
+
+    RtlZeroMemory(s->SubAuthority, sizeof(s->SubAuthority));
+    for (UCHAR i = 0; i < subCount && i < RTL_NUMBER_OF(s->SubAuthority); i++)
+        s->SubAuthority[i] = subAuthorities[i];
 }
 
 // 全部特权 LUID（1~35）
