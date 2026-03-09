@@ -4,13 +4,6 @@ project(OpenSysKitDriver C CXX)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 find_package(WDK REQUIRED)
 
-if(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
-    set(WDK_KM_LIB_PATH "${WDK_ROOT}/Lib/${WDK_VERSION}/km/arm64")
-    link_directories(${WDK_KM_LIB_PATH})
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /LIBPATH:\"${WDK_KM_LIB_PATH}\"")
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /LIBPATH:\"${WDK_KM_LIB_PATH}\"")
-endif()
-
 wdk_add_driver(OpenSysKit
     src/driver.cpp
     src/dkom.cpp
@@ -28,10 +21,23 @@ wdk_add_driver(OpenSysKit
 )
 
 target_include_directories(OpenSysKit PRIVATE src)
-target_compile_options(OpenSysKit PRIVATE /utf-8 /GS- /Oi)
+target_compile_options(OpenSysKit PRIVATE /utf-8 /GS-)
 
-if(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
-    target_compile_definitions(OpenSysKit PRIVATE _ARM64_ _KERNEL_MODE)
+# ARM64我造密码
+if(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
+    target_compile_definitions(OpenSysKit PRIVATE 
+        _ARM64_
+        _USE_INTRINSIC_INTERLOCKED_EXCHANGE_POINTER
+    )
+    # target_link_libraries(OpenSysKit 
+    #     ntoskrnl.lib
+    #     hal.lib
+    #     wmilib.lib
+    # )
+
+    target_compile_options(OpenSysKit PRIVATE 
+        /Oi
+    )
 endif()
 
 target_link_options(OpenSysKit PRIVATE /INTEGRITYCHECK)
