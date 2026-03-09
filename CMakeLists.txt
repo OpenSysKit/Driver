@@ -1,4 +1,3 @@
-
 cmake_minimum_required(VERSION 3.16)
 project(OpenSysKitDriver C CXX)
 
@@ -23,4 +22,23 @@ wdk_add_driver(OpenSysKit
 
 target_include_directories(OpenSysKit PRIVATE src)
 target_compile_options(OpenSysKit PRIVATE /utf-8 /GS-)
+
+#　ARM我造密码
+if(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
+    target_compile_definitions(OpenSysKit PRIVATE 
+        _ARM64_
+        _USE_INTRINSIC_INTERLOCKED_EXCHANGE_POINTER
+    )
+    
+    target_link_libraries(OpenSysKit PRIVATE 
+        ntoskrnl.lib
+        hal.lib
+        wmilib.lib
+    )
+    target_compile_options(OpenSysKit PRIVATE 
+        /Oi
+        /wd4214
+    )
+endif()
+
 target_link_options(OpenSysKit PRIVATE /INTEGRITYCHECK)
