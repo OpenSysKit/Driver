@@ -1,0 +1,410 @@
+{
+  "meta": {
+    "title": "OpenSysKit",
+    "subtitle": "内核驱动开发文档",
+    "tagline": "Windows 10 2004+  ·  Windows 11  ·  x64  ·  Kernel Mode Driver",
+    "version": "v1.2.0",
+    "date": "2026-03",
+    "device": "\\\\.\\OpenSysKit",
+    "nt_device": "\\Device\\OpenSysKit",
+    "symlink": "\\??\\OpenSysKit",
+    "platform": "Windows 10 2004 (Build 19041) 及以上，64 位。不兼容 Win7/Win8。",
+    "build_req": "NTDDI_VERSION=0x0A000008，链接 ntoskrnl.lib、hal.lib"
+  },
+
+  "ioctls": [
+    {
+      "name": "IOCTL_ENUM_PROCESSES",
+      "code": "0x800",
+      "input": "—",
+      "output": "PROCESS_LIST_HEADER + PROCESS_INFO[]",
+      "desc": "枚举系统所有进程"
+    },
+    {
+      "name": "IOCTL_KILL_PROCESS",
+      "code": "0x801",
+      "input": "PROCESS_REQUEST",
+      "output": "PROCESS_KILL_RESULT",
+      "desc": "内核级终止进程（PSP 路径 + ZW 回退）"
+    },
+    {
+      "name": "IOCTL_FREEZE_PROCESS",
+      "code": "0x802",
+      "input": "PROCESS_REQUEST",
+      "output": "—",
+      "desc": "挂起进程所有线程"
+    },
+    {
+      "name": "IOCTL_UNFREEZE_PROCESS",
+      "code": "0x803",
+      "input": "PROCESS_REQUEST",
+      "output": "—",
+      "desc": "恢复进程所有线程"
+    },
+    {
+      "name": "IOCTL_PROTECT_PROCESS",
+      "code": "0x805",
+      "input": "PROCESS_REQUEST",
+      "output": "—",
+      "desc": "设置 PPL-Antimalware 保护"
+    },
+    {
+      "name": "IOCTL_UNPROTECT_PROCESS",
+      "code": "0x806",
+      "input": "PROCESS_REQUEST",
+      "output": "—",
+      "desc": "取消 PPL 保护，恢复原始值"
+    },
+    {
+      "name": "IOCTL_ELEVATE_PROCESS",
+      "code": "0x807",
+      "input": "PROCESS_ELEVATE_REQUEST",
+      "output": "—",
+      "desc": "替换进程 Token（SYSTEM / TI / Admin / User）"
+    },
+    {
+      "name": "IOCTL_ENUM_MODULES",
+      "code": "0x808",
+      "input": "PROCESS_REQUEST",
+      "output": "MODULE_LIST_HEADER + MODULE_INFO[]",
+      "desc": "枚举进程已加载模块（读 PEB.Ldr）"
+    },
+    {
+      "name": "IOCTL_READ_PROCESS_MEMORY",
+      "code": "0x809",
+      "input": "PROCESS_MEMORY_REQUEST",
+      "output": "raw bytes",
+      "desc": "读取进程内存  [暂时禁用]",
+      "disabled": true
+    },
+    {
+      "name": "IOCTL_WRITE_PROCESS_MEMORY",
+      "code": "0x80A",
+      "input": "PROCESS_MEMORY_REQUEST + data",
+      "output": "—",
+      "desc": "写入进程内存  [暂时禁用]",
+      "disabled": true
+    },
+    {
+      "name": "IOCTL_ENUM_THREADS",
+      "code": "0x80B",
+      "input": "PROCESS_REQUEST",
+      "output": "THREAD_LIST_HEADER + THREAD_INFO[]",
+      "desc": "枚举进程所有线程（TID、优先级、起始地址）"
+    },
+    {
+      "name": "IOCTL_HIDE_PROCESS",
+      "code": "0x80C",
+      "input": "PROCESS_REQUEST",
+      "output": "—",
+      "desc": "DKOM：从 ActiveProcessLinks 摘除进程"
+    },
+    {
+      "name": "IOCTL_UNHIDE_PROCESS",
+      "code": "0x80D",
+      "input": "PROCESS_REQUEST",
+      "output": "—",
+      "desc": "DKOM：将隐藏进程重新插回链表"
+    },
+    {
+      "name": "IOCTL_INJECT_DLL",
+      "code": "0x80E",
+      "input": "INJECT_DLL_REQUEST",
+      "output": "—",
+      "desc": "通过内核 APC 向进程注入 DLL"
+    },
+    {
+      "name": "IOCTL_DELETE_FILE",
+      "code": "0x810",
+      "input": "FILE_PATH_REQUEST",
+      "output": "—",
+      "desc": "内核级删除文件（绕过占用锁和只读属性）"
+    },
+    {
+      "name": "IOCTL_ENUM_KERNEL_MODULES",
+      "code": "0x820",
+      "input": "—",
+      "output": "KERNEL_MODULE_LIST_HEADER + KERNEL_MODULE_INFO[]",
+      "desc": "枚举内核驱动模块（PsLoadedModuleList）"
+    },
+    {
+      "name": "IOCTL_UNLOAD_DRIVER",
+      "code": "0x821",
+      "input": "DRIVER_SERVICE_REQUEST",
+      "output": "—",
+      "desc": "强制卸载内核驱动（清零 DriverUnload + ZwUnloadDriver）"
+    },
+    {
+      "name": "IOCTL_ENUM_HANDLES",
+      "code": "0x830",
+      "input": "HANDLE_ENUM_REQUEST",
+      "output": "HANDLE_LIST_HEADER + HANDLE_INFO[]",
+      "desc": "枚举系统/进程句柄（含对象名和类型名）"
+    },
+    {
+      "name": "IOCTL_CLOSE_HANDLE",
+      "code": "0x831",
+      "input": "CLOSE_HANDLE_REQUEST",
+      "output": "—",
+      "desc": "强制关闭目标进程中的指定句柄"
+    },
+    {
+      "name": "IOCTL_REG_DELETE_KEY",
+      "code": "0x840",
+      "input": "REG_PATH_REQUEST",
+      "output": "—",
+      "desc": "内核级递归删除注册表键  [暂时禁用]",
+      "disabled": true
+    },
+    {
+      "name": "IOCTL_REG_DELETE_VALUE",
+      "code": "0x841",
+      "input": "REG_VALUE_REQUEST",
+      "output": "—",
+      "desc": "内核级删除注册表值  [暂时禁用]",
+      "disabled": true
+    },
+    {
+      "name": "IOCTL_ENUM_CONNECTIONS",
+      "code": "0x850",
+      "input": "—",
+      "output": "CONNECTION_LIST_HEADER + CONNECTION_INFO[]",
+      "desc": "枚举系统 TCP/UDP 连接及所属 PID（NSI 接口）"
+    }
+  ],
+
+  "sections": [
+    {
+      "id": "processes",
+      "title": "进程管理",
+      "items": [
+        {
+          "subtitle": "枚举进程  IOCTL_ENUM_PROCESSES",
+          "body": "输出缓冲：PROCESS_LIST_HEADER 紧跟 Count 个 PROCESS_INFO。使用 PsGetNextProcess 遍历，持有进程引用计数，遍历结束统一释放。",
+          "fields": [
+            ["ProcessId",       "ULONG",   "进程 PID"],
+            ["ParentProcessId", "ULONG",   "父进程 PID"],
+            ["ThreadCount",     "ULONG",   "线程数量"],
+            ["WorkingSetSize",  "SIZE_T",  "工作集大小（字节）"],
+            ["ImageName[260]",  "WCHAR[]", "进程映像文件名（不含路径）"]
+          ]
+        },
+        {
+          "subtitle": "终止进程  IOCTL_KILL_PROCESS",
+          "body": "两段式策略：优先通过 PspTerminateThreadByPointer + PsGetNextProcessThread 逐线程精准终止；若解析失败则回退 ZwTerminateProcess。对系统关键进程（BreakOnTermination 标志）返回 STATUS_ACCESS_DENIED。",
+          "fields": [
+            ["Version",         "ULONG", "固定为 1"],
+            ["OperationStatus", "ULONG", "实际操作的 NTSTATUS"],
+            ["Method",          "ULONG", "0=失败  1=PSP路径  2=ZW路径"],
+            ["Reserved",        "ULONG", "保留，填 0"]
+          ]
+        },
+        {
+          "subtitle": "冻结 / 解冻  IOCTL_FREEZE_PROCESS / UNFREEZE_PROCESS",
+          "body": "调用未导出的 PsSuspendThread / PsResumeThread，通过 PsGetNextProcessThread 遍历目标进程所有线程。对 PID 0/4 拒绝操作防止死锁。"
+        },
+        {
+          "subtitle": "PPL 保护  IOCTL_PROTECT_PROCESS / UNPROTECT_PROCESS",
+          "body": "直接修改 EPROCESS.Protection 字段，将进程设为 PPL-Antimalware（Type=1, Signer=3）。偏移通过三字节特征扫描 PsInitialSystemProcess 动态定位，兼容 Win10 19041 至 Win11 最新版本。保护表最多记录 64 条，驱动卸载后保护持续有效。"
+        },
+        {
+          "subtitle": "Token 提权  IOCTL_ELEVATE_PROCESS",
+          "body": "原地替换 EPROCESS.Token（EX_FAST_REF），遵循 ObReference/ObDereference 规范，不触发 REFERENCE_BY_POINTER 蓝屏。",
+          "fields": [
+            ["0  ADMIN",             "—", "复制 winlogon.exe / lsass.exe Token"],
+            ["1  SYSTEM",            "—", "复制 PID=4 Token"],
+            ["2  TRUSTED_INSTALLER", "—", "优先复制 TrustedInstaller.exe；进程未运行时 ZwCreateToken 构造（含全部 35 个特权）"],
+            ["3  STANDARD_USER",     "—", "复制同 Session 的 explorer.exe / ShellExperienceHost.exe Token"]
+          ]
+        },
+        {
+          "subtitle": "模块枚举  IOCTL_ENUM_MODULES",
+          "body": "KeStackAttachProcess 附加到目标进程地址空间，读取 PEB.Ldr->InLoadOrderModuleList，全程异常保护。仅支持 64 位进程（WOW64 扩展留作后续）。",
+          "fields": [
+            ["BaseAddress",   "ULONG_PTR", "模块基址"],
+            ["SizeOfImage",   "ULONG",     "映像大小（字节）"],
+            ["FullPath[520]", "WCHAR[]",   "完整文件路径"],
+            ["BaseName[260]", "WCHAR[]",   "文件名"]
+          ]
+        },
+        {
+          "subtitle": "线程枚举  IOCTL_ENUM_THREADS",
+          "body": "通过 PsGetNextProcessThread 遍历，只用公开导出函数取字段（PsGetThreadId、KeQueryPriorityThread、PsGetThreadWin32StartAddress），不裸读 ETHREAD 偏移，版本兼容性好。",
+          "fields": [
+            ["ThreadId",       "ULONG",   "线程 ID"],
+            ["ProcessId",      "ULONG",   "所属进程 PID"],
+            ["Priority",       "LONG",    "当前调度优先级（1~31）"],
+            ["StartAddress",   "ULONG64", "Win32 用户态起始地址"],
+            ["IsTerminating",  "BOOLEAN", "线程是否正在退出"]
+          ]
+        },
+        {
+          "subtitle": "DKOM 进程隐藏  IOCTL_HIDE_PROCESS / UNHIDE_PROCESS",
+          "body": "将目标进程的 EPROCESS.ActiveProcessLinks 节点从双向链表中摘除，NtQuerySystemInformation(SystemProcessInformation) 遍历此链表，因此任务管理器、Process Hacker 等工具看不到该进程。摘除后节点 Flink/Blink 指向自身，保证其他遍历路径不 BSOD。原始链表指针保存在驱动内部，可随时通过 UNHIDE_PROCESS 恢复。ActiveProcessLinks 偏移在 EPROCESS 内动态扫描定位。最多同时隐藏 32 个进程。"
+        },
+        {
+          "subtitle": "DLL 注入  IOCTL_INJECT_DLL",
+		  "desc":"[暂时禁用]",
+          "body": "内核 APC 注入：附加到目标进程地址空间 → 从 PEB.Ldr 解析 KERNELBASE.dll 导出表定位 LoadLibraryW → ZwAllocateVirtualMemory 分配路径缓冲区 → KeInsertQueueApc 向目标进程的第一个非终止线程排队用户模式 APC，APC 例程指向 LoadLibraryW。目标线程进入可报警等待时 DLL 自动加载。注入是异步的，函数返回 STATUS_SUCCESS 代表 APC 已入队，不代表 DLL 加载完成。",
+          "fields": [
+            ["ProcessId",    "ULONG",    "目标进程 PID"],
+            ["DllPath[520]", "WCHAR[]",  "目标进程可见的 Win32 完整路径，如 C:\\path\\to\\dll.dll"]
+          ],
+		  "disabled": true
+        }
+      ]
+    },
+    {
+      "id": "files",
+      "title": "文件操作",
+      "items": [
+        {
+          "subtitle": "删除文件  IOCTL_DELETE_FILE",
+          "body": "使用 NT 格式路径（\\??\\C:\\... 或 \\Device\\...）。优先使用 FileDispositionInformationEx（Win10 1709+），带 POSIX_SEMANTICS 和 IGNORE_READONLY_ATTRIBUTE 标志，可在文件有其他句柄打开时仍标记删除、忽略只读属性；系统不支持时回退旧 FileDispositionInformation。路径长度上限 520 个 WCHAR，须以 \\ 开头。"
+        }
+      ]
+    },
+    {
+      "id": "kernel",
+      "title": "内核模块",
+      "items": [
+        {
+          "subtitle": "枚举内核模块  IOCTL_ENUM_KERNEL_MODULES",
+          "body": "遍历 PsLoadedModuleList，持有 PsLoadedModuleResource 读锁保证链表稳定。可枚举所有已加载内核驱动，包括通过手动映射绕过 DSE 加载的模块（只要它们在该链表中）。",
+          "fields": [
+            ["BaseAddress",   "ULONG_PTR", "驱动加载基址"],
+            ["SizeOfImage",   "ULONG",     "映像大小（字节）"],
+            ["FullPath[520]", "WCHAR[]",   "完整路径"],
+            ["BaseName[64]",  "WCHAR[]",   "文件名"]
+          ]
+        },
+        {
+          "subtitle": "强制卸载驱动  IOCTL_UNLOAD_DRIVER",
+          "body": "通过 ObReferenceObjectByName(\"\\Driver\\<n>\") 获取 DRIVER_OBJECT，清零 DriverObject->DriverUnload 防止驱动在回调中拒绝卸载，然后调用 ZwUnloadDriver 走系统卸载流程。ServiceName 可带或不带 .sys 后缀，内部统一处理。仅适用于通过 SCM 或 ZwLoadDriver 加载的驱动。",
+          "fields": [
+            ["ServiceName[256]", "WCHAR[]", "服务名，如 BadDriver 或 BadDriver.sys"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "handles",
+      "title": "句柄操作",
+      "items": [
+        {
+          "subtitle": "枚举句柄  IOCTL_ENUM_HANDLES",
+          "body": "通过 ZwQuerySystemInformation(SystemHandleInformation=16) 获取全局句柄表，对每条记录调用 ObQueryNameString 和 ObGetObjectType 填充对象名称与类型名。ProcessId=0 返回全系统所有句柄；句柄数量可能很大，建议输出缓冲至少 8 MB。",
+          "fields": [
+            ["ProcessId",       "ULONG",  "所属进程 PID"],
+            ["Handle",          "ULONG64","句柄值"],
+            ["ObjectTypeIndex", "ULONG",  "对象类型索引"],
+            ["GrantedAccess",   "ULONG",  "访问权限掩码"],
+            ["ObjectAddress",   "ULONG64","内核对象地址"],
+            ["TypeName[64]",    "WCHAR[]","对象类型名（如 File、Process、Key）"],
+            ["ObjectName[260]", "WCHAR[]","对象名称（如文件路径、注册表路径）"]
+          ]
+        },
+        {
+          "subtitle": "强制关闭句柄  IOCTL_CLOSE_HANDLE",
+          "body": "KeStackAttachProcess 附加到目标进程地址空间后调用 ZwClose，绕过普通跨进程句柄操作的权限检查。常用于解锁被占用的文件（先用 ENUM_HANDLES 找到持有该文件的句柄，再 CLOSE_HANDLE 关闭）。",
+          "fields": [
+            ["ProcessId", "ULONG",  "目标进程 PID"],
+            ["Handle",    "ULONG64","要关闭的句柄值"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "registry",
+      "title": "注册表操作  [暂时禁用]",
+      "disabled": true,
+      "items": [
+        {
+          "subtitle": "删除键  IOCTL_REG_DELETE_KEY",
+          "body": "路径须为 NT 格式（\\Registry\\Machine\\SOFTWARE\\...）。递归删除所有子键后再删除目标键，最大递归深度 32 层。内核模式不经过用户态 ACL 检查，可删除受保护键。当前 case 已注释，调用返回 STATUS_NOT_SUPPORTED。"
+        },
+        {
+          "subtitle": "删除值  IOCTL_REG_DELETE_VALUE",
+          "body": "指定键路径和值名，调用 ZwDeleteValueKey。当前 case 已注释，调用返回 STATUS_NOT_SUPPORTED。"
+        }
+      ]
+    },
+    {
+      "id": "network",
+      "title": "网络",
+      "items": [
+        {
+          "subtitle": "枚举连接  IOCTL_ENUM_CONNECTIONS",
+          "body": "打开 \\Device\\Nsi（Network Store Interface），通过 NSI_PROXY_IOCTL_ENUMERATE_TABLE_STEADY 分别查询 IPv4 TCP 和 UDP 连接表，返回本地/远端地址端口、状态及所属 PID。这是 netstat -ano 的内核底层实现。TCP 状态：1=CLOSED 2=LISTEN 3=SYN_SENT 4=SYN_RCVD 5=ESTABLISHED 6=FIN_WAIT1 7=FIN_WAIT2 8=CLOSE_WAIT 9=CLOSING 10=LAST_ACK 11=TIME_WAIT 12=DELETE_TCB",
+          "fields": [
+            ["Protocol",       "ULONG",   "6=TCP  17=UDP"],
+            ["State",          "ULONG",   "TCP 连接状态，UDP 为 0"],
+            ["ProcessId",      "ULONG",   "所属进程 PID"],
+            ["LocalAddr[16]",  "UCHAR[]", "本地 IP，IPv4 用前 4 字节"],
+            ["LocalPort",      "USHORT",  "本地端口（主机字节序）"],
+            ["RemoteAddr[16]", "UCHAR[]", "远端 IP"],
+            ["RemotePort",     "USHORT",  "远端端口（主机字节序）"],
+            ["IsIPv6",         "BOOLEAN", "当前固定为 FALSE"]
+          ]
+        }
+      ]
+    }
+  ],
+
+  "source_files": [
+    ["driver.h / driver.cpp",       "驱动入口、IRP 分发、全局上下文、所有 IOCTL 控制码和数据结构定义"],
+    ["process.h / process.cpp",     "进程枚举、终止（PSP+ZW双路径）、文件删除、PspTerminateThreadByPointer 动态解析"],
+    ["protect.h / protect.cpp",     "EPROCESS.Protection 三字节特征扫描、PPL 保护/恢复、SpinLock 保护表"],
+    ["token.h / token.cpp",         "EX_FAST_REF 安全 Token 替换、ZwCreateToken 构造 TrustedInstaller Token"],
+    ["freeze.h / freeze.cpp",       "PsSuspendThread / PsResumeThread 冻结/解冻"],
+    ["memory.h / memory.cpp",       "进程内存读写（暂时禁用入口）、PEB Ldr 模块枚举"],
+    ["threads.h / threads.cpp",     "进程线程枚举（PsGetNextProcessThread + 公开导出函数）"],
+    ["dkom.h / dkom.cpp",           "DKOM 进程隐藏：ActiveProcessLinks 动态偏移定位、摘除/恢复"],
+    ["inject.h / inject.cpp",       "内核 APC DLL 注入：PEB 模块遍历解析 LoadLibraryW + KeInsertQueueApc"],
+    ["kernelmod.h / kernelmod.cpp", "PsLoadedModuleList 内核模块枚举（持读锁遍历）"],
+    ["unload_driver.h / unload_driver.cpp", "强制卸载内核驱动：ObReferenceObjectByName + 清零 DriverUnload + ZwUnloadDriver"],
+    ["handle.h / handle.cpp",       "SystemHandleInformation 句柄枚举、附加进程强制关闭句柄"],
+    ["registry.h / registry.cpp",   "内核级注册表键/值删除（暂时禁用，入口返回 STATUS_NOT_SUPPORTED）"],
+    ["network.h / network.cpp",     "NSI 接口 TCP/UDP 连接枚举"]
+  ],
+
+  "examples": [
+    {
+      "title": "打开设备",
+      "code": "HANDLE hDrv = CreateFileW(\n    L\"\\\\\\\\.\\\\OpenSysKit\",\n    GENERIC_READ | GENERIC_WRITE, 0,\n    nullptr, OPEN_EXISTING, 0, nullptr);"
+    },
+    {
+      "title": "枚举进程",
+      "code": "std::vector<BYTE> buf(1 << 20);\nDWORD out = 0;\nDeviceIoControl(hDrv, IOCTL_ENUM_PROCESSES,\n    nullptr, 0, buf.data(), (DWORD)buf.size(), &out, nullptr);\nauto* hdr = (PROCESS_LIST_HEADER*)buf.data();\nauto* procs = (PROCESS_INFO*)(hdr + 1);\nfor (ULONG i = 0; i < hdr->Count; i++)\n    wprintf(L\"PID=%-6lu %s\\n\", procs[i].ProcessId, procs[i].ImageName);"
+    },
+    {
+      "title": "枚举线程",
+      "code": "PROCESS_REQUEST req{ targetPid };\nstd::vector<BYTE> buf(1 << 16);\nDWORD out = 0;\nDeviceIoControl(hDrv, IOCTL_ENUM_THREADS,\n    &req, sizeof(req), buf.data(), (DWORD)buf.size(), &out, nullptr);\nauto* hdr = (THREAD_LIST_HEADER*)buf.data();\nauto* threads = (THREAD_INFO*)(hdr + 1);\nfor (ULONG i = 0; i < hdr->Count; i++)\n    printf(\"TID=%-6lu  prio=%d  start=%016llX\\n\",\n        threads[i].ThreadId, threads[i].Priority, threads[i].StartAddress);"
+    },
+    {
+      "title": "DKOM 隐藏进程",
+      "code": "PROCESS_REQUEST req{ targetPid };\nDWORD out = 0;\n// 隐藏\nDeviceIoControl(hDrv, IOCTL_HIDE_PROCESS,\n    &req, sizeof(req), nullptr, 0, &out, nullptr);\n// 恢复\nDeviceIoControl(hDrv, IOCTL_UNHIDE_PROCESS,\n    &req, sizeof(req), nullptr, 0, &out, nullptr);"
+    },
+    {
+      "title": "注入 DLL",
+      "code": "INJECT_DLL_REQUEST req{};\nreq.ProcessId = targetPid;\nwcscpy_s(req.DllPath, L\"C:\\\\tools\\\\payload.dll\");\nDWORD out = 0;\nDeviceIoControl(hDrv, IOCTL_INJECT_DLL,\n    &req, sizeof(req), nullptr, 0, &out, nullptr);"
+    },
+    {
+      "title": "强制关闭占用文件的句柄",
+      "code": "// 1. 枚举句柄，找到目标文件路径对应的句柄\nHANDLE_ENUM_REQUEST enumReq{ 0 };  // 0 = 全系统\nstd::vector<BYTE> buf(8 << 20);\nDWORD out = 0;\nDeviceIoControl(hDrv, IOCTL_ENUM_HANDLES,\n    &enumReq, sizeof(enumReq), buf.data(), (DWORD)buf.size(), &out, nullptr);\n\n// 2. 关闭找到的句柄\nCLOSE_HANDLE_REQUEST closeReq{ targetPid, handleValue };\nDeviceIoControl(hDrv, IOCTL_CLOSE_HANDLE,\n    &closeReq, sizeof(closeReq), nullptr, 0, &out, nullptr);"
+    },
+    {
+      "title": "强制卸载驱动",
+      "code": "DRIVER_SERVICE_REQUEST req{};\nwcscpy_s(req.ServiceName, L\"BadDriver\");  // 不用加 .sys\nDWORD out = 0;\nDeviceIoControl(hDrv, IOCTL_UNLOAD_DRIVER,\n    &req, sizeof(req), nullptr, 0, &out, nullptr);"
+    }
+  ],
+
+  "error_notes": [
+    "所有 IOCTL 在输入缓冲长度不足时返回 STATUS_BUFFER_TOO_SMALL（0xC0000023）",
+    "进程/线程操作对 PID 0 和 PID 4 一律返回 STATUS_ACCESS_DENIED（0xC0000022）",
+    "枚举类接口若输出缓冲不够大，只返回能填入的条目，Count 反映实际写入数，TotalSize 反映全量所需大小，可据此重新分配缓冲后重试",
+    "暂时禁用的 IOCTL（内存读写、注册表）返回 STATUS_NOT_SUPPORTED（0xC00000BB）",
+    "DKOM 隐藏表上限 32 条，超出返回 STATUS_INSUFFICIENT_RESOURCES",
+    "DLL 注入为异步操作，STATUS_SUCCESS 仅代表 APC 已入队，DLL 需等目标线程进入可报警等待后才实际加载"
+  ]
+}

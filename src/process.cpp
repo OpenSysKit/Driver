@@ -8,24 +8,29 @@
 #include <ntifs.h>
 #include "process.h"
 
-// ZwQuerySystemInformation 未在公开头文件中声明
 extern "C" NTSTATUS NTAPI ZwQuerySystemInformation(
-    ULONG SystemInformationClass,
-    PVOID SystemInformation,
-    ULONG SystemInformationLength,
+    ULONG  SystemInformationClass,
+    PVOID  SystemInformation,
+    ULONG  SystemInformationLength,
     PULONG ReturnLength
 );
 
 extern "C" NTSTATUS NTAPI ZwQueryInformationProcess(
     HANDLE ProcessHandle,
-    ULONG ProcessInformationClass,
-    PVOID ProcessInformation,
-    ULONG ProcessInformationLength,
+    ULONG  ProcessInformationClass,
+    PVOID  ProcessInformation,
+    ULONG  ProcessInformationLength,
     PULONG ReturnLength
 );
 
-#define SystemProcessInformation 5
-#define ProcessBreakOnTermination 29
+// 精准遍历指定进程的所有线程，返回线程持有引用，调用方须 ObDereferenceObject
+extern "C" PETHREAD NTAPI PsGetNextProcessThread(
+    _In_     PEPROCESS Process,
+    _In_opt_ PETHREAD  Thread
+);
+
+#define SystemProcessInformation        5
+#define ProcessBreakOnTermination       29
 
 #ifndef PROCESS_QUERY_LIMITED_INFORMATION
 #define PROCESS_QUERY_LIMITED_INFORMATION 0x1000
@@ -33,11 +38,10 @@ extern "C" NTSTATUS NTAPI ZwQueryInformationProcess(
 
 // ========== PspTerminateThreadByPointer 解析 ==========
 //
-// Win10/11 x64 PsTerminateSystemThread 内部以 E9（rel32 jmp）跳转到
-// PspTerminateThreadByPointer，扫描范围 0xFF 字节，非常稳定。
+// PsTerminateSystemThread 内部以 E9 rel32 跳转到 PspTerminateThreadByPointer，
+// 扫描 0xFF 字节内定位目标地址。
 //
-// 签名：NTSTATUS PspTerminateThreadByPointer(PETHREAD, NTSTATUS, BOOLEAN)
-//
+
 typedef NTSTATUS(__fastcall* PFN_PSP_TERMINATE_THREAD)(
     PETHREAD pEThread,
     NTSTATUS ntExitCode,
@@ -46,11 +50,7 @@ typedef NTSTATUS(__fastcall* PFN_PSP_TERMINATE_THREAD)(
 
 static PFN_PSP_TERMINATE_THREAD g_PspTerminateThread = nullptr;
 
-//
-// 在 [pStart, pEnd) 范围内搜索特征码，
-// 返回特征码之后的地址（即 rel32 偏移所在位置）。
-//
-static PVOID SearchMemory(
+static PVOID SearchPattern(
     _In_ PVOID  pStart,
     _In_ PVOID  pEnd,
     _In_ PUCHAR pPattern,
@@ -61,51 +61,67 @@ static PVOID SearchMemory(
         for (m = 0; m < patternSize; m++) {
             if (*(i + m) != pPattern[m]) break;
         }
-        if (m >= patternSize) {
-            return (PVOID)(i + patternSize);
-        }
+        if (m >= patternSize) return (PVOID)(i + patternSize);
     }
     return nullptr;
 }
 
-VOID ResolvePspTerminateProcess()
+VOID ResolvePspTerminateThread()
 {
     g_PspTerminateThread = nullptr;
 
-    // Win10/11 x64 固定特征码 E9
-    UCHAR pattern = 0xE9;
-
     UNICODE_STRING funcName;
     RtlInitUnicodeString(&funcName, L"PsTerminateSystemThread");
-    PVOID pPsTerminateSystemThread = MmGetSystemRoutineAddress(&funcName);
-    if (!pPsTerminateSystemThread) {
+    PVOID pBase = MmGetSystemRoutineAddress(&funcName);
+    if (!pBase) {
         DbgPrint("[OpenSysKit] [Resolve] PsTerminateSystemThread not found\n");
         return;
     }
 
-    DbgPrint("[OpenSysKit] [Resolve] PsTerminateSystemThread=%p\n", pPsTerminateSystemThread);
+    UCHAR pattern = 0xE9;
+    PVOID pRelOffset = SearchPattern(
+        pBase,
+        (PVOID)((PUCHAR)pBase + 0xFF),
+        &pattern, 1);
 
-    PVOID pRelOffset = SearchMemory(
-        pPsTerminateSystemThread,
-        (PVOID)((PUCHAR)pPsTerminateSystemThread + 0xFF),
-        &pattern, 1
-    );
     if (!pRelOffset) {
         DbgPrint("[OpenSysKit] [Resolve] E9 not found in PsTerminateSystemThread\n");
         return;
     }
 
-    // 读取 rel32 偏移，计算目标地址
-    LONG lOffset = *(PLONG)pRelOffset;
+    LONG  lOffset = *(PLONG)pRelOffset;
     PVOID pTarget = (PVOID)((PUCHAR)pRelOffset + sizeof(LONG) + lOffset);
 
     DbgPrint("[OpenSysKit] [Resolve] PspTerminateThreadByPointer=%p\n", pTarget);
     g_PspTerminateThread = (PFN_PSP_TERMINATE_THREAD)pTarget;
 }
 
+// ========== 系统进程信息结构 ==========
+
+typedef struct _SYSTEM_PROCESS_INFORMATION_ENTRY {
+    ULONG          NextEntryOffset;
+    ULONG          NumberOfThreads;
+    LARGE_INTEGER  Reserved[3];
+    LARGE_INTEGER  CreateTime;
+    LARGE_INTEGER  UserTime;
+    LARGE_INTEGER  KernelTime;
+    UNICODE_STRING ImageName;
+    KPRIORITY      BasePriority;
+    HANDLE         UniqueProcessId;
+    HANDLE         InheritedFromUniqueProcessId;
+    ULONG          HandleCount;
+    ULONG          SessionId;
+    ULONG_PTR      PageDirectoryBase;
+    SIZE_T         PeakVirtualSize;
+    SIZE_T         VirtualSize;
+    ULONG          PageFaultCount;
+    SIZE_T         PeakWorkingSetSize;
+    SIZE_T         WorkingSetSize;
+} SYSTEM_PROCESS_INFORMATION_ENTRY, *PSYSTEM_PROCESS_INFORMATION_ENTRY;
+
 static VOID FillProcessKillResult(
     _Out_ PPROCESS_KILL_RESULT Result,
-    _In_  ULONG   Method,
+    _In_  ULONG    Method,
     _In_  NTSTATUS OperationStatus)
 {
     Result->Version         = PROCESS_KILL_RESULT_VERSION;
@@ -113,29 +129,6 @@ static VOID FillProcessKillResult(
     Result->Method          = Method;
     Result->Reserved        = 0;
 }
-
-// ========== 系统进程信息结构 ==========
-
-typedef struct _SYSTEM_PROCESS_INFORMATION_ENTRY {
-    ULONG NextEntryOffset;
-    ULONG NumberOfThreads;
-    LARGE_INTEGER Reserved[3];
-    LARGE_INTEGER CreateTime;
-    LARGE_INTEGER UserTime;
-    LARGE_INTEGER KernelTime;
-    UNICODE_STRING ImageName;
-    KPRIORITY BasePriority;
-    HANDLE UniqueProcessId;
-    HANDLE InheritedFromUniqueProcessId;
-    ULONG HandleCount;
-    ULONG SessionId;
-    ULONG_PTR PageDirectoryBase;
-    SIZE_T PeakVirtualSize;
-    SIZE_T VirtualSize;
-    ULONG PageFaultCount;
-    SIZE_T PeakWorkingSetSize;
-    SIZE_T WorkingSetSize;
-} SYSTEM_PROCESS_INFORMATION_ENTRY, *PSYSTEM_PROCESS_INFORMATION_ENTRY;
 
 // ========== 进程枚举 ==========
 
@@ -207,7 +200,7 @@ NTSTATUS ProcessEnumerate(PVOID OutputBuffer, ULONG OutputBufferSize, PULONG Byt
     return STATUS_SUCCESS;
 }
 
-// ========== 辅助：通过 PID 打开进程句柄 ==========
+// ========== 辅助：打开进程句柄 ==========
 
 static NTSTATUS OpenProcessById(ULONG ProcessId, PHANDLE ProcessHandle, ACCESS_MASK Access)
 {
@@ -220,6 +213,15 @@ static NTSTATUS OpenProcessById(ULONG ProcessId, PHANDLE ProcessHandle, ACCESS_M
 }
 
 // ========== 内核级终止 ==========
+//
+// 路径 1：用 PsGetNextProcessThread 遍历目标进程所有线程，
+//         逐一调用 PspTerminateThreadByPointer 终止。
+//         PsGetNextProcessThread 对返回线程持有引用，处理完须 ObDereferenceObject。
+//
+// 路径 2：PspTerminateThreadByPointer 未解析或无线程可杀时，
+//         回退到 ZwTerminateProcess。
+//         终止前检查 ProcessBreakOnTermination，为关键进程时拒绝操作。
+//
 
 NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
 {
@@ -229,47 +231,38 @@ NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
 
     if (ProcessId == 0 || ProcessId == 4) {
         FillProcessKillResult(Result, PROCESS_KILL_METHOD_NONE, STATUS_ACCESS_DENIED);
-        return STATUS_SUCCESS;
+        return STATUS_ACCESS_DENIED;
     }
 
-    // --- 路径 1：PspTerminateThreadByPointer 遍历线程终止 ---
+    // 路径 1：PspTerminateThreadByPointer
     if (g_PspTerminateThread) {
         PEPROCESS pTargetProcess = nullptr;
-        NTSTATUS status = PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)ProcessId, &pTargetProcess);
+        NTSTATUS status = PsLookupProcessByProcessId(
+            (HANDLE)(ULONG_PTR)ProcessId, &pTargetProcess);
         if (!NT_SUCCESS(status)) {
             FillProcessKillResult(Result, PROCESS_KILL_METHOD_PSP, status);
-            return STATUS_SUCCESS;
+            return status;
         }
 
         ULONG killedThreads = 0;
-
-        for (ULONG tid = 4; tid < 0x80000; tid += 4) {
-            PETHREAD pThread = nullptr;
-            status = PsLookupThreadByThreadId((HANDLE)(ULONG_PTR)tid, &pThread);
-            if (!NT_SUCCESS(status)) continue;
-
-            PEPROCESS pThreadProcess = PsGetThreadProcess(pThread);
-            if (pThreadProcess == pTargetProcess) {
-                __try {
-                    NTSTATUS killStatus = g_PspTerminateThread(pThread, 0, TRUE);
-                    if (NT_SUCCESS(killStatus)) {
-                        killedThreads++;
-                        DbgPrint("[OpenSysKit] killed TID=%lu\n", tid);
-                    }
-                }
-                __except (EXCEPTION_EXECUTE_HANDLER) {
-                    DbgPrint("[OpenSysKit] exception on TID=%lu: 0x%08X\n",
-                        tid, GetExceptionCode());
-                }
+        PETHREAD pThread = PsGetNextProcessThread(pTargetProcess, NULL);
+        while (pThread != NULL) {
+            __try {
+                NTSTATUS killStatus = g_PspTerminateThread(pThread, 0, TRUE);
+                if (NT_SUCCESS(killStatus)) killedThreads++;
             }
-
-            // 每次 Lookup 必须 Dereference，否则可能蓝屏
+            __except (EXCEPTION_EXECUTE_HANDLER) {
+                DbgPrint("[OpenSysKit] exception on thread %p: 0x%08X\n",
+                    pThread, GetExceptionCode());
+            }
+            PETHREAD pNext = PsGetNextProcessThread(pTargetProcess, pThread);
             ObDereferenceObject(pThread);
+            pThread = pNext;
         }
 
         ObDereferenceObject(pTargetProcess);
 
-        DbgPrint("[OpenSysKit] ProcessKill PID=%lu via PspTerminateThreadByPointer, killed %lu threads\n",
+        DbgPrint("[OpenSysKit] ProcessKill PID=%lu via PspTerminateThread, killed=%lu\n",
             ProcessId, killedThreads);
 
         if (killedThreads > 0) {
@@ -277,16 +270,16 @@ NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
             return STATUS_SUCCESS;
         }
 
-        DbgPrint("[OpenSysKit] no threads found for PID=%lu, falling back to Zw\n", ProcessId);
+        DbgPrint("[OpenSysKit] PID=%lu no threads killed, fallback to ZwTerminateProcess\n", ProcessId);
     }
 
-    // --- 路径 2：ZwTerminateProcess 回退 ---
+    // 路径 2：ZwTerminateProcess
     HANDLE hProcess = NULL;
     NTSTATUS status = OpenProcessById(ProcessId, &hProcess,
         PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION);
     if (!NT_SUCCESS(status)) {
         FillProcessKillResult(Result, PROCESS_KILL_METHOD_ZW, status);
-        return STATUS_SUCCESS;
+        return status;
     }
 
     ULONG breakOnTermination = 0;
@@ -295,52 +288,83 @@ NTSTATUS ProcessKill(ULONG ProcessId, PPROCESS_KILL_RESULT Result)
     if (!NT_SUCCESS(status)) {
         ZwClose(hProcess);
         FillProcessKillResult(Result, PROCESS_KILL_METHOD_ZW, status);
-        return STATUS_SUCCESS;
+        return status;
     }
     if (breakOnTermination != 0) {
         ZwClose(hProcess);
         FillProcessKillResult(Result, PROCESS_KILL_METHOD_ZW, STATUS_ACCESS_DENIED);
-        return STATUS_SUCCESS;
+        return STATUS_ACCESS_DENIED;
     }
 
     status = ZwTerminateProcess(hProcess, STATUS_SUCCESS);
     DbgPrint("[OpenSysKit] ProcessKill PID=%lu via ZwTerminateProcess: 0x%08X\n", ProcessId, status);
     ZwClose(hProcess);
     FillProcessKillResult(Result, PROCESS_KILL_METHOD_ZW, status);
-    return STATUS_SUCCESS;
+    return status;
 }
 
 // ========== 文件删除 ==========
+//
+// 优先使用 FileDispositionInformationEx（Win10 1709+）：
+//   POSIX_SEMANTICS            — 允许有其他 Handle 打开时仍能标记删除
+//   IGNORE_READONLY_ATTRIBUTE  — 忽略只读属性限制
+// 系统不支持时回退旧的 FileDispositionInformation。
+//
+// 入参须为 NT 绝对路径（\??\ 或 \Device\...），不接受 Win32 路径。
+//
+
+#define FileDispositionInformationEx            64
+#define FILE_DISPOSITION_DELETE                 0x00000001
+#define FILE_DISPOSITION_POSIX_SEMANTICS        0x00000002
+#define FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE 0x00000010
+
+typedef struct _FILE_DISPOSITION_INFORMATION_EX {
+    ULONG Flags;
+} FILE_DISPOSITION_INFORMATION_EX, *PFILE_DISPOSITION_INFORMATION_EX;
 
 NTSTATUS FileDeleteKernel(PCWSTR Path)
 {
     if (!Path || Path[0] == L'\0') return STATUS_INVALID_PARAMETER;
-    if (Path[0] != L'\\')         return STATUS_INVALID_PARAMETER;
+    if (Path[0] != L'\\')          return STATUS_INVALID_PARAMETER;
+
+    SIZE_T pathLen = 0;
+    while (Path[pathLen]) pathLen++;
+    if (pathLen < 4) return STATUS_INVALID_PARAMETER;
 
     UNICODE_STRING ntPath;
     RtlInitUnicodeString(&ntPath, Path);
 
     OBJECT_ATTRIBUTES objAttr;
-    InitializeObjectAttributes(&objAttr, &ntPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    InitializeObjectAttributes(&objAttr, &ntPath,
+        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
 
     IO_STATUS_BLOCK iosb = { 0 };
     HANDLE hFile = NULL;
 
     NTSTATUS status = ZwCreateFile(
-        &hFile, DELETE | SYNCHRONIZE, &objAttr, &iosb, NULL,
+        &hFile,
+        DELETE | SYNCHRONIZE,
+        &objAttr, &iosb, NULL,
         FILE_ATTRIBUTE_NORMAL,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         FILE_OPEN,
         FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
-        NULL, 0
-    );
+        NULL, 0);
     if (!NT_SUCCESS(status)) return status;
 
-    FILE_DISPOSITION_INFORMATION disposition = { 0 };
-    disposition.DeleteFile = TRUE;
+    FILE_DISPOSITION_INFORMATION_EX dispEx = {
+        FILE_DISPOSITION_DELETE |
+        FILE_DISPOSITION_POSIX_SEMANTICS |
+        FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE
+    };
+    status = ZwSetInformationFile(hFile, &iosb, &dispEx,
+        sizeof(dispEx), (FILE_INFORMATION_CLASS)FileDispositionInformationEx);
 
-    status = ZwSetInformationFile(hFile, &iosb, &disposition,
-        sizeof(disposition), FileDispositionInformation);
+    if (status == STATUS_INVALID_INFO_CLASS || status == STATUS_NOT_SUPPORTED) {
+        FILE_DISPOSITION_INFORMATION disp = { TRUE };
+        status = ZwSetInformationFile(hFile, &iosb, &disp,
+            sizeof(disp), FileDispositionInformation);
+    }
 
     ZwClose(hFile);
     return status;
