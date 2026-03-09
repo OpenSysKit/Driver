@@ -111,7 +111,8 @@
       "code": "0x80E",
       "input": "INJECT_DLL_REQUEST",
       "output": "—",
-      "desc": "通过内核 APC 向进程注入 DLL"
+      "desc": "通过内核 APC 向进程注入 DLL  [当前分发层已禁用，调用返回 STATUS_NOT_SUPPORTED]",
+      "disabled": true
     },
     {
       "name": "IOCTL_DELETE_FILE",
@@ -125,7 +126,7 @@
       "code": "0x820",
       "input": "—",
       "output": "KERNEL_MODULE_LIST_HEADER + KERNEL_MODULE_INFO[]",
-      "desc": "枚举内核驱动模块（PsLoadedModuleList）"
+      "desc": "枚举内核驱动模块（ZwQuerySystemInformation(SystemModuleInformation)）"
     },
     {
       "name": "IOCTL_UNLOAD_DRIVER",
@@ -139,7 +140,7 @@
       "code": "0x830",
       "input": "HANDLE_ENUM_REQUEST",
       "output": "HANDLE_LIST_HEADER + HANDLE_INFO[]",
-      "desc": "枚举系统/进程句柄（含对象名和类型名）"
+      "desc": "枚举系统/进程句柄（含对象名；类型名当前以 TypeIndex#N 形式回填）"
     },
     {
       "name": "IOCTL_CLOSE_HANDLE",
@@ -245,7 +246,7 @@
         {
           "subtitle": "DLL 注入  IOCTL_INJECT_DLL",
 		  "desc":"[暂时禁用]",
-          "body": "内核 APC 注入：附加到目标进程地址空间 → 从 PEB.Ldr 解析 KERNELBASE.dll 导出表定位 LoadLibraryW → ZwAllocateVirtualMemory 分配路径缓冲区 → KeInsertQueueApc 向目标进程的第一个非终止线程排队用户模式 APC，APC 例程指向 LoadLibraryW。目标线程进入可报警等待时 DLL 自动加载。注入是异步的，函数返回 STATUS_SUCCESS 代表 APC 已入队，不代表 DLL 加载完成。",
+          "body": "当前驱动分发层已显式禁用该 IOCTL，调用直接返回 STATUS_NOT_SUPPORTED。下述 APC 注入流程为保留实现：附加到目标进程地址空间 → 从 PEB.Ldr 解析 KERNELBASE.dll 导出表定位 LoadLibraryW → ZwAllocateVirtualMemory 分配路径缓冲区 → KeInsertQueueApc 向目标进程的第一个非终止线程排队用户模式 APC，APC 例程指向 LoadLibraryW。若后续重新启用，该流程仍为异步，STATUS_SUCCESS 仅代表 APC 已入队，不代表 DLL 已完成加载。",
           "fields": [
             ["ProcessId",    "ULONG",    "目标进程 PID"],
             ["DllPath[520]", "WCHAR[]",  "目标进程可见的 Win32 完整路径，如 C:\\path\\to\\dll.dll"]
@@ -270,7 +271,7 @@
       "items": [
         {
           "subtitle": "枚举内核模块  IOCTL_ENUM_KERNEL_MODULES",
-          "body": "遍历 PsLoadedModuleList，持有 PsLoadedModuleResource 读锁保证链表稳定。可枚举所有已加载内核驱动，包括通过手动映射绕过 DSE 加载的模块（只要它们在该链表中）。",
+          "body": "通过 ZwQuerySystemInformation(SystemModuleInformation) 获取系统模块快照，返回当前系统已登记的内核驱动模块列表。该实现依赖系统提供的模块信息缓冲，而不是直接遍历 PsLoadedModuleList。",
           "fields": [
             ["BaseAddress",   "ULONG_PTR", "驱动加载基址"],
             ["SizeOfImage",   "ULONG",     "映像大小（字节）"],
@@ -293,14 +294,14 @@
       "items": [
         {
           "subtitle": "枚举句柄  IOCTL_ENUM_HANDLES",
-          "body": "通过 ZwQuerySystemInformation(SystemHandleInformation=16) 获取全局句柄表，对每条记录调用 ObQueryNameString 和 ObGetObjectType 填充对象名称与类型名。ProcessId=0 返回全系统所有句柄；句柄数量可能很大，建议输出缓冲至少 8 MB。",
+          "body": "通过 ZwQuerySystemInformation(SystemHandleInformation=16) 获取全局句柄表，对每条记录调用 ObQueryNameString 获取对象名称。当前实现未调用 ObGetObjectType，类型名以 TypeIndex#N 的占位字符串回填。ProcessId=0 返回全系统所有句柄；句柄数量可能很大，建议输出缓冲至少 8 MB。",
           "fields": [
             ["ProcessId",       "ULONG",  "所属进程 PID"],
             ["Handle",          "ULONG64","句柄值"],
             ["ObjectTypeIndex", "ULONG",  "对象类型索引"],
             ["GrantedAccess",   "ULONG",  "访问权限掩码"],
             ["ObjectAddress",   "ULONG64","内核对象地址"],
-            ["TypeName[64]",    "WCHAR[]","对象类型名（如 File、Process、Key）"],
+            ["TypeName[64]",    "WCHAR[]","对象类型名占位，当前格式为 TypeIndex#N"],
             ["ObjectName[260]", "WCHAR[]","对象名称（如文件路径、注册表路径）"]
           ]
         },
@@ -360,10 +361,10 @@
     ["memory.h / memory.cpp",       "进程内存读写（暂时禁用入口）、PEB Ldr 模块枚举"],
     ["threads.h / threads.cpp",     "进程线程枚举（PsGetNextProcessThread + 公开导出函数）"],
     ["dkom.h / dkom.cpp",           "DKOM 进程隐藏：ActiveProcessLinks 动态偏移定位、摘除/恢复"],
-    ["inject.h / inject.cpp",       "内核 APC DLL 注入：PEB 模块遍历解析 LoadLibraryW + KeInsertQueueApc"],
-    ["kernelmod.h / kernelmod.cpp", "PsLoadedModuleList 内核模块枚举（持读锁遍历）"],
+    ["inject.h / inject.cpp",       "内核 APC DLL 注入保留实现：PEB 模块遍历解析 LoadLibraryW + KeInsertQueueApc（当前 dispatch 默认禁用）"],
+    ["kernelmod.h / kernelmod.cpp", "ZwQuerySystemInformation(SystemModuleInformation) 内核模块枚举"],
     ["unload_driver.h / unload_driver.cpp", "强制卸载内核驱动：ObReferenceObjectByName + 清零 DriverUnload + ZwUnloadDriver"],
-    ["handle.h / handle.cpp",       "SystemHandleInformation 句柄枚举、附加进程强制关闭句柄"],
+    ["handle.h / handle.cpp",       "SystemHandleInformation 句柄枚举、对象名查询、附加进程强制关闭句柄（类型名当前用 TypeIndex#N 占位）"],
     ["registry.h / registry.cpp",   "内核级注册表键/值删除（暂时禁用，入口返回 STATUS_NOT_SUPPORTED）"],
     ["network.h / network.cpp",     "NSI 接口 TCP/UDP 连接枚举"]
   ],
@@ -386,8 +387,8 @@
       "code": "PROCESS_REQUEST req{ targetPid };\nDWORD out = 0;\n// 隐藏\nDeviceIoControl(hDrv, IOCTL_HIDE_PROCESS,\n    &req, sizeof(req), nullptr, 0, &out, nullptr);\n// 恢复\nDeviceIoControl(hDrv, IOCTL_UNHIDE_PROCESS,\n    &req, sizeof(req), nullptr, 0, &out, nullptr);"
     },
     {
-      "title": "注入 DLL",
-      "code": "INJECT_DLL_REQUEST req{};\nreq.ProcessId = targetPid;\nwcscpy_s(req.DllPath, L\"C:\\\\tools\\\\payload.dll\");\nDWORD out = 0;\nDeviceIoControl(hDrv, IOCTL_INJECT_DLL,\n    &req, sizeof(req), nullptr, 0, &out, nullptr);"
+      "title": "注入 DLL（当前分发层已禁用）",
+      "code": "INJECT_DLL_REQUEST req{};\nreq.ProcessId = targetPid;\nwcscpy_s(req.DllPath, L\"C:\\\\tools\\\\payload.dll\");\nDWORD out = 0;\n// 当前 dispatch 默认返回 STATUS_NOT_SUPPORTED\nDeviceIoControl(hDrv, IOCTL_INJECT_DLL,\n    &req, sizeof(req), nullptr, 0, &out, nullptr);"
     },
     {
       "title": "强制关闭占用文件的句柄",
@@ -405,6 +406,7 @@
     "枚举类接口若输出缓冲不够大，只返回能填入的条目，Count 反映实际写入数，TotalSize 反映全量所需大小，可据此重新分配缓冲后重试",
     "暂时禁用的 IOCTL（内存读写、注册表）返回 STATUS_NOT_SUPPORTED（0xC00000BB）",
     "DKOM 隐藏表上限 32 条，超出返回 STATUS_INSUFFICIENT_RESOURCES",
-    "DLL 注入为异步操作，STATUS_SUCCESS 仅代表 APC 已入队，DLL 需等目标线程进入可报警等待后才实际加载"
+    "IOCTL_INJECT_DLL 当前在驱动分发层默认禁用，调用通常返回 STATUS_NOT_SUPPORTED（0xC00000BB）",
+    "若后续重新启用 DLL 注入，STATUS_SUCCESS 仅代表 APC 已入队，DLL 需等目标线程进入可报警等待后才实际加载"
   ]
 }
