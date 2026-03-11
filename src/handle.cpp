@@ -146,19 +146,11 @@ NTSTATUS EnumHandles(
         QueryObjectTypeName(entry->ObjectTypeIndex, outEntry->TypeName,
             RTL_NUMBER_OF(outEntry->TypeName));
 
-        // ObQueryNameString on file/registry objects enters the filesystem stack
-        // which calls KeEnterCriticalRegion internally. If an exception occurs
-        // mid-call the APC disable count leaks. Guard with explicit critical
-        // region so that even if the inner call faults, our leave restores it.
+        // 临时禁用对象名解析：
+        // ObQueryNameString 在某些文件/注册表对象上会进入文件系统路径，
+        // 当前分发版在该链路上存在 APC 计数不平衡风险（APC_INDEX_MISMATCH）。
+        // 在彻底修复前先只返回基础句柄信息，ObjectName 保持为空。
         RtlZeroMemory(outEntry->ObjectName, sizeof(outEntry->ObjectName));
-        KeEnterCriticalRegion();
-        __try {
-            QueryObjectName(entry->Object, outEntry->ObjectName,
-                RTL_NUMBER_OF(outEntry->ObjectName));
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
-        KeLeaveCriticalRegion();
 
         count++;
         outEntry++;
