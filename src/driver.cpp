@@ -38,6 +38,8 @@ static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     NTSTATUS status       = STATUS_SUCCESS;
     ULONG    bytesWritten = 0;
 
+    ExAcquireFastMutex(&g_DriverContext.IoctlMutex);
+
     switch (ioctl) {
 
     // ===== 进程 =====
@@ -185,6 +187,8 @@ static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         break;
     }
 
+    ExReleaseFastMutex(&g_DriverContext.IoctlMutex);
+
     Irp->IoStatus.Status      = status;
     Irp->IoStatus.Information = bytesWritten;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -253,6 +257,8 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
     DriverObject->DriverUnload                          = DriverUnload;
 
     g_DriverContext.DeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+
+    ExInitializeFastMutex(&g_DriverContext.IoctlMutex);
 
     ResolvePspTerminateThread();
 

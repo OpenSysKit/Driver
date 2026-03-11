@@ -143,16 +143,22 @@ NTSTATUS EnumHandles(
         outEntry->GrantedAccess   = entry->GrantedAccess;
         outEntry->ObjectAddress   = (ULONG64)entry->Object;
 
-        // 查询类型名和对象名（Object 是内核地址，直接使用）
+        QueryObjectTypeName(entry->ObjectTypeIndex, outEntry->TypeName,
+            RTL_NUMBER_OF(outEntry->TypeName));
+
+        // ObQueryNameString on file/registry objects enters the filesystem stack
+        // which calls KeEnterCriticalRegion internally. If an exception occurs
+        // mid-call the APC disable count leaks. Guard with explicit critical
+        // region so that even if the inner call faults, our leave restores it.
+        RtlZeroMemory(outEntry->ObjectName, sizeof(outEntry->ObjectName));
+        KeEnterCriticalRegion();
         __try {
-            QueryObjectTypeName(entry->ObjectTypeIndex, outEntry->TypeName,
-                RTL_NUMBER_OF(outEntry->TypeName));
             QueryObjectName(entry->Object, outEntry->ObjectName,
                 RTL_NUMBER_OF(outEntry->ObjectName));
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {
-            // 查询失败留空，不影响其他字段
         }
+        KeLeaveCriticalRegion();
 
         count++;
         outEntry++;

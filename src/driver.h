@@ -255,6 +255,7 @@ typedef struct _DRIVER_CONTEXT {
     UCHAR          OriginalProtection[MAX_PROTECTED_PIDS];
     ULONG          ProtectedPidCount;
     KSPIN_LOCK     ProtectLock;
+    FAST_MUTEX     IoctlMutex;
 } DRIVER_CONTEXT, *PDRIVER_CONTEXT;
 
 extern DRIVER_CONTEXT g_DriverContext;
