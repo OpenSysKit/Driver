@@ -1,4 +1,5 @@
 #include "driver.h"
+#include "signature.h"
 #include "process.h"
 #include "protect.h"
 #include "token.h"
@@ -27,6 +28,15 @@ static NTSTATUS DispatchCreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     UNREFERENCED_PARAMETER(DeviceObject);
+
+    SIGNATURE_STATUS sigStatus = VerifyCallerSignature();
+    if (sigStatus != SignatureValid) {
+        DbgPrint("[OpenSysKit] Caller signature verification failed: %d\n", sigStatus);
+        Irp->IoStatus.Status = STATUS_ACCESS_DENIED;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_ACCESS_DENIED;
+    }
 
     PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
     ULONG  ioctl  = irpSp->Parameters.DeviceIoControl.IoControlCode;
@@ -204,6 +214,8 @@ static VOID DriverUnload(PDRIVER_OBJECT DriverObject)
     // 保护在驱动卸载后继续有效，不在此恢复
     // CleanupProtect();
 
+    CleanupSignatureVerification();
+
     UNICODE_STRING symLink;
     RtlInitUnicodeString(&symLink, SYMLINK_NAME);
     IoDeleteSymbolicLink(&symLink);
@@ -259,6 +271,8 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
     g_DriverContext.DeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
 
     ExInitializeFastMutex(&g_DriverContext.IoctlMutex);
+
+    InitializeSignatureVerification();
 
     ResolvePspTerminateThread();
 

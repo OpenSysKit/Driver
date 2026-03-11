@@ -15,6 +15,7 @@ wdk_add_driver(OpenSysKit
     src/network.cpp
     src/process.cpp
     src/protect.cpp
+    src/signature.cpp
     src/threads.cpp
     src/token.cpp
     src/unload_driver.cpp
