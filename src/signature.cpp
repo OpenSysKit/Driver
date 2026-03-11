@@ -40,7 +40,14 @@ extern "C" {
 
 static PVOID SigAllocMem(SIZE_T Size)
 {
+#ifdef POOL_FLAG_NON_PAGED
     return ExAllocatePool2(POOL_FLAG_NON_PAGED, Size, SIGNATURE_TAG);
+#else
+    #pragma warning(suppress: 4996)
+    PVOID p = ExAllocatePoolWithTag(NonPagedPool, Size, SIGNATURE_TAG);
+    if (p) RtlZeroMemory(p, Size);
+    return p;
+#endif
 }
 
 static VOID SigFreeMem(PVOID Ptr)
