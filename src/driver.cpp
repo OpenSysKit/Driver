@@ -192,6 +192,17 @@ static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         status = UnhideProcess(((PPROCESS_REQUEST)inBuf)->ProcessId);
         break;
 
+    // ===== 生命周期 =====
+
+    case IOCTL_DETACH_SYMLINK:
+    {
+        UNICODE_STRING symLinkName;
+        RtlInitUnicodeString(&symLinkName, SYMLINK_NAME);
+        status = IoDeleteSymbolicLink(&symLinkName);
+        DbgPrint("[OpenSysKit] IOCTL_DETACH_SYMLINK: 0x%X\n", status);
+        break;
+    }
+
     default:
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
