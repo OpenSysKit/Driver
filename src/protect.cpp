@@ -42,8 +42,11 @@ typedef union _PS_PROTECTION {
 // 以 System 进程（PID=4）为已知样本扫描偏移。
 // EPROCESS 中三个字段紧邻排列（Win10/Win11 均如此）：
 //   [offset-2] SignatureLevel        : 0x3C（WinSystem）
-//   [offset-1] SectionSignatureLevel : 非零
+//   [offset-1] SectionSignatureLevel : 可能为 0
 //   [offset]   Protection.Level      : 0x72（WinSystem + Protected）
+//
+// 只用 SignatureLevel + Protection 两字节联合验证，
+// SectionSignatureLevel 在某些版本上为 0，不参与匹配。
 //
 
 #define SYSTEM_PROTECTION_LEVEL  0x72
@@ -61,7 +64,6 @@ static NTSTATUS FindProtectionOffset()
     for (ULONG offset = 0x302; offset < 0xC00; offset++) {
         if (base[offset]   != SYSTEM_PROTECTION_LEVEL) continue;
         if (base[offset-2] != SYSTEM_SIGNATURE_LEVEL)  continue;
-        if (base[offset-1] == 0x00)                    continue;
 
         g_ProtectionOffset = offset;
         DbgPrint("[OpenSysKit] EPROCESS.Protection offset: 0x%X "
