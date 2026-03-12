@@ -1,135 +1,99 @@
-# PspTerminateThreadByPointer 逆向分析
+# process.cpp 逆向笔记 — PspTerminateThreadByPointer
 
-## 背景
+## 起因
 
-`PspTerminateThreadByPointer` 是 Windows 内核未导出函数，可用于强制终止指定线程。驱动通过导出函数 `PsTerminateSystemThread` 的函数体进行特征码扫描来定位它。
+驱动在 Win11 (Build 26200) 上跑的时候，`ResolvePspTerminateThread()` 解析出来的地址是错的，调用直接炸。排查发现是特征码扫描逻辑有问题。
 
-在 Win11 Build 26100+ 上，微软修改了 `PsTerminateSystemThread` 的编译产物，导致原有的单字节 `E9` 扫描逻辑失效。
+## 思路
 
-## Win10 x64 函数布局
+`PspTerminateThreadByPointer` 没有被 ntoskrnl 导出，但 `PsTerminateSystemThread` 是导出的，而且它内部一定会调用/跳转到 `PspTerminateThreadByPointer`。所以从 `PsTerminateSystemThread` 的函数体里找 call/jmp 指令就能拿到目标地址。
 
-`PsTerminateSystemThread` 在 Win10 上非常简短，开头直接跳转：
+## Win10 的情况
 
-```
-PsTerminateSystemThread:
-  E9 xx xx xx xx        ; jmp PspTerminateThreadByPointer
-```
-
-函数体仅一条指令，`E9` 在偏移 0 处。
-
-## Win11 x64 (Build 26200) 函数布局
-
-通过 `dumpbin /exports` 获取 `PsTerminateSystemThread` 的 RVA（`0x9D8000`），再根据 PE Section Header 计算文件偏移，读取原始字节：
+Win10 上 `PsTerminateSystemThread` 就一条指令，开头直接 `jmp`：
 
 ```
-+0x00: 48 83 EC 28           ; sub  rsp, 28h          ← 完整 stack frame
-+0x04: 8B D1                 ; mov  edx, ecx
-+0x06: 65 48 8B 0C 25 88 01  ; mov  rcx, gs:[188h]    ← 读取 KTHREAD (gs:[188h])
-+0x0D: 00 00
-+0x0F: F7 41 74 00 04 00 00  ; test [rcx+74h], 00000400h  ← 检查线程标志
-+0x16: 75 0B                 ; jnz  +0Bh               ← 标志不匹配则继续
-+0x18: B8 0D 00 00 C0        ; mov  eax, 0xC000000D    ← STATUS_INVALID_PARAMETER
-+0x1D: 48 83 C4 28           ; add  rsp, 28h
-+0x21: C3                    ; ret
-+0x22: CC                    ; int 3 (padding)
-+0x23: 41 B0 01              ; mov  r8b, 1             ← bDirectTerminate = TRUE
-+0x26: E8 xx xx xx xx        ; call PspTerminateThreadByPointer  ← 目标
-+0x2B: EB F0                 ; jmp  -10h (回到 add rsp,28h; ret)
+E9 xx xx xx xx    ; jmp PspTerminateThreadByPointer
 ```
 
-### 关键差异
+所以搜一个 `E9` 就完事了，没什么好说的。
 
-| 特性 | Win10 | Win11 (26200) |
-|------|-------|---------------|
-| Stack frame | 无 | `sub rsp, 28h` |
-| 线程标志检查 | 无 | `test [rcx+74h], 400h` |
-| 调用方式 | `E9 rel32` (jmp) | `E8 rel32` (call) |
-| 调用前指令 | 无 | `mov r8b, 1` |
-| 目标偏移 | +0x00 | +0x26 |
+## Win11 出了什么问题
 
-## 旧代码的 Bug
-
-旧代码在 0xFF 范围内先搜索单字节 `E9`，找不到再搜 `E8`：
-
-```cpp
-PVOID pRelOffset = SearchPattern(pBase, pEnd, &patternE9, 1);  // 搜 E9
-if (!pRelOffset)
-    pRelOffset = SearchPattern(pBase, pEnd, &patternE8, 1);    // 搜 E8
-```
-
-在 Win11 上，偏移 `0xA6` 处存在一个不相关的 `E9`（跳转到其他函数），旧代码会优先匹配到它，解析出错误的地址。
-
-实际扫描结果：
-
-| 偏移 | 字节 | 含义 |
-|------|------|------|
-| 0x26 | `E8` | **正确** — `call PspTerminateThreadByPointer` |
-| 0x75 | `E8` | 其他 call |
-| 0x9C | `E8` | 其他 call |
-| 0xA6 | `E9` | **误匹配** — 不相关的 jmp |
-
-## 修复方案：三级特征码匹配
+拿 dumpbin 看了一下 Win11 26200 的 ntoskrnl，`PsTerminateSystemThread` 变复杂了：
 
 ```
-优先级 1 (Win11):  搜索 41 B0 01 E8 (mov r8b,1; call)
-优先级 2 (Win10):  在前 16 字节内搜索 E9 (限制范围避免误匹配)
-优先级 3 (回退):   全范围搜索 E8
++00: 48 83 EC 28        sub  rsp, 28h           ; 多了栈帧
++04: 8B D1              mov  edx, ecx
++06: 65 48 8B 0C 25 ... mov  rcx, gs:[188h]     ; 取当前 KTHREAD
++0F: F7 41 74 ...       test [rcx+74h], 400h    ; 查线程标志位
++16: 75 0B              jnz  short ...
++18: B8 0D 00 00 C0     mov  eax, C000000Dh     ; 不满足就返回 STATUS_INVALID_PARAMETER
++1D: 48 83 C4 28        add  rsp, 28h
++21: C3                 ret
++22: CC                 padding
++23: 41 B0 01           mov  r8b, 1             ; bDirectTerminate = TRUE
++26: E8 xx xx xx xx     call PspTerminateThreadByPointer   <-- 在这
++2B: EB F0              jmp  short (回去 ret)
 ```
 
-Win11 模式 `41 B0 01 E8` 的含义：
-- `41 B0 01` = `mov r8b, 1`（设置 `bDirectTerminate = TRUE`）
-- `E8` = `call` 的操作码
+问题就在于：旧代码先搜 `E9`，搜 0xFF 范围。Win11 上函数头附近根本没有 `E9`，但偏移 `0xA6` 的地方有一个完全不相关的 `E9`（跳到别的函数去了），被误匹配了。
 
-这个 4 字节序列在 `PsTerminateSystemThread` 函数体内是唯一的，不会误匹配。
+手动扫了一遍 0xFF 范围内所有 E9/E8：
 
-## 逆向工具与方法
+```
+偏移 0x26: E8 → call PspTerminateThreadByPointer  ✓ 这才是对的
+偏移 0x75: E8 → 别的 call
+偏移 0x9C: E8 → 别的 call
+偏移 0xA6: E9 → 不相关的 jmp                      ✗ 旧代码匹配到了这个
+```
 
-### 获取函数 RVA
+## 怎么修的
+
+改成三级匹配：
+
+1. 先搜 `41 B0 01 E8`（`mov r8b, 1` + `call`），这是 Win11 上调用 psp 前的固定搭配，4 字节够长不会撞
+2. 没匹配到就在前 16 字节找 `E9`，给 Win10 用（限制范围，不会匹配到后面那个野 E9）
+3. 都没有就全范围搜 `E8` 兜底
+
+## 怎么离线逆向的
+
+没开内核调试，纯离线分析 ntoskrnl.exe：
+
+**1) 拿函数 RVA**
+
+```
+dumpbin /exports C:\Windows\System32\ntoskrnl.exe | findstr PsTerminateSystemThread
+→ 009D8000
+```
+
+**2) RVA 转文件偏移**
+
+```
+dumpbin /headers ntoskrnl.exe
+```
+
+找 .text section：VA=0x1000, FileOffset=0x600
+
+```
+文件偏移 = 0x9D8000 - 0x1000 + 0x600 = 0x9D7600
+```
+
+（注：实际跑的时候发现 dumpbin 输出的 section 信息和预期有偏差，最终用 `0x951000` 作为文件偏移才对上，可能是 ntoskrnl 的 section alignment 比较特殊，建议以实际 hexdump 对照为准。）
+
+**3) PowerShell 读字节**
 
 ```powershell
-dumpbin /exports C:\Windows\System32\ntoskrnl.exe | Select-String "PsTerminateSystemThread"
-# 输出示例: 1750  6D7 009D8000 PsTerminateSystemThread
-#                              ^^^^^^^^ RVA
+$bytes = [IO.File]::ReadAllBytes("C:\Windows\System32\ntoskrnl.exe")
+# 从文件偏移处读 48 字节，手动反汇编确认
 ```
 
-### RVA 转文件偏移
+**4) 验证目标**
 
-通过 `dumpbin /headers` 获取 `.text` section 信息：
+算出 call 的目标 RVA 后，再去读那个地址的字节，看是不是正常的函数 prologue（`sub rsp, xx` 之类的），确认没算错。
 
-```
-SECTION HEADER #1
-  .text name
-  9B7D88 virtual size
-  1000 virtual address        ← Section VA
-  9B7E00 size of raw data
-  600 file pointer to raw data ← Section 文件偏移
-```
+## 注意事项
 
-```
-文件偏移 = RVA - Section_VA + Section_FileOffset
-         = 0x9D8000 - 0x1000 + 0x600
-         = 0x9D7600
-```
-
-### 读取原始字节
-
-```powershell
-$bytes = [System.IO.File]::ReadAllBytes("C:\Windows\System32\ntoskrnl.exe")
-$offset = 0x9D7600  # 计算得到的文件偏移（注意：不同版本需要重新计算）
-for ($i = 0; $i -lt 48; $i += 16) {
-    $hex = ($bytes[($offset+$i)..($offset+$i+15)] | ForEach-Object { $_.ToString("X2") }) -join " "
-    Write-Host ("{0:X}: {1}" -f ($offset+$i), $hex)
-}
-```
-
-### 验证目标地址
-
-匹配到 `E8` 后，计算目标 RVA：
-
-```
-目标 RVA = 当前 RVA + 5 + rel32偏移
-         = 0x9D802B + (signed)0xFFECFC85
-         = 0x8A7CB0
-```
-
-再读取目标地址的字节，确认是有效函数入口（典型的 `sub rsp, ...` 或 `push rbx` 等 prologue）。
+- 不同 Win11 版本的 ntoskrnl 编译产物可能不同，`41 B0 01 E8` 这个模式不保证永远有效，后续大版本更新需要复查
+- Win10 各版本目前都是开头直接 `E9`，比较稳定
+- `SearchPattern` 返回的是 pattern 末尾之后的地址，所以匹配 `41 B0 01 E8` 后 `pRelOffset` 直接指向 rel32 偏移，不需要额外 +1
