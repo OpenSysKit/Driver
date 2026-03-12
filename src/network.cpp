@@ -183,47 +183,10 @@ NTSTATUS EnumConnections(
     if (OutputBufferSize < sizeof(CONNECTION_LIST_HEADER))
         return STATUS_BUFFER_TOO_SMALL;
 
-    ULONG maxEntries = (OutputBufferSize - sizeof(CONNECTION_LIST_HEADER))
-                       / sizeof(CONNECTION_INFO);
-
-    // 打开 NSI 设备
-    UNICODE_STRING nsiName;
-    RtlInitUnicodeString(&nsiName, L"\\Device\\Nsi");
-
-    OBJECT_ATTRIBUTES objAttr;
-    InitializeObjectAttributes(&objAttr, &nsiName,
-        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-
-    IO_STATUS_BLOCK iosb = { 0 };
-    HANDLE hNsi = NULL;
-    NTSTATUS status = ZwOpenFile(&hNsi,
-        SYNCHRONIZE | FILE_READ_DATA,
-        &objAttr, &iosb,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        FILE_SYNCHRONOUS_IO_NONALERT);
-
-    if (!NT_SUCCESS(status)) {
-        DbgPrint("[OpenSysKit] [Net] ZwOpenFile \\Device\\Nsi failed: 0x%08X\n", status);
-        return status;
-    }
-
-    ULONG totalCount = 0;
-
-    status = QueryNsiTable(hNsi, TRUE,  OutputBuffer, OutputBufferSize, &totalCount, maxEntries);
-    if (!NT_SUCCESS(status))
-        DbgPrint("[OpenSysKit] [Net] TCP query failed: 0x%08X\n", status);
-
-    status = QueryNsiTable(hNsi, FALSE, OutputBuffer, OutputBufferSize, &totalCount, maxEntries);
-    if (!NT_SUCCESS(status))
-        DbgPrint("[OpenSysKit] [Net] UDP query failed: 0x%08X\n", status);
-
-    ZwClose(hNsi);
-
+    // NSI 内核接口在 Win11 上返回 STATUS_NOT_IMPLEMENTED，暂时禁用
     PCONNECTION_LIST_HEADER header = (PCONNECTION_LIST_HEADER)OutputBuffer;
-    header->Count     = totalCount;
-    header->TotalSize = sizeof(CONNECTION_LIST_HEADER) + totalCount * sizeof(CONNECTION_INFO);
-    *BytesWritten     = header->TotalSize;
-
-    DbgPrint("[OpenSysKit] [Net] EnumConnections: %lu entries\n", totalCount);
+    header->Count     = 0;
+    header->TotalSize = sizeof(CONNECTION_LIST_HEADER);
+    *BytesWritten     = sizeof(CONNECTION_LIST_HEADER);
     return STATUS_SUCCESS;
 }

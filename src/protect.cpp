@@ -40,11 +40,10 @@ typedef union _PS_PROTECTION {
 // ========== 动态查找 EPROCESS.Protection 偏移 ==========
 //
 // 以 System 进程（PID=4）为已知样本扫描偏移。
-// System 进程的三字节特征：
-//   [offset-2] SectionSignatureLevel : 非零
-//   [offset-1] SignatureLevel        : 0x3C（WinSystem）
+// EPROCESS 中三个字段紧邻排列（Win10/Win11 均如此）：
+//   [offset-2] SignatureLevel        : 0x3C（WinSystem）
+//   [offset-1] SectionSignatureLevel : 非零
 //   [offset]   Protection.Level      : 0x72（WinSystem + Protected）
-// 三字节联合验证降低误判概率。
 //
 
 #define SYSTEM_PROTECTION_LEVEL  0x72
@@ -61,13 +60,13 @@ static NTSTATUS FindProtectionOffset()
 
     for (ULONG offset = 0x302; offset < 0xC00; offset++) {
         if (base[offset]   != SYSTEM_PROTECTION_LEVEL) continue;
-        if (base[offset-1] != SYSTEM_SIGNATURE_LEVEL)  continue;
-        if (base[offset-2] == 0x00)                    continue;
+        if (base[offset-2] != SYSTEM_SIGNATURE_LEVEL)  continue;
+        if (base[offset-1] == 0x00)                    continue;
 
         g_ProtectionOffset = offset;
         DbgPrint("[OpenSysKit] EPROCESS.Protection offset: 0x%X "
-                 "(sig=0x%02X sectSig=0x%02X)\n",
-                 offset, base[offset-1], base[offset-2]);
+                 "(sigLevel=0x%02X sectSigLevel=0x%02X)\n",
+                 offset, base[offset-2], base[offset-1]);
         return STATUS_SUCCESS;
     }
 
