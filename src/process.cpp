@@ -38,8 +38,9 @@ typedef PETHREAD (NTAPI* PFN_PS_GET_NEXT_PROCESS_THREAD)(
 
 // ========== PspTerminateThreadByPointer 解析 ==========
 //
-// Win10:  PsTerminateSystemThread 开头直接 E9 rel32 跳转到 PspTerminateThreadByPointer
-// Win11:  函数有完整 stack frame，通过 41 B0 01 E8 rel32 (mov r8b,1; call) 调用
+// 从 PsTerminateSystemThread 函数体中扫描所有 E8/E9 (call/jmp rel32)，
+// 排除已知导出函数后，对目标地址做 prologue 校验，找到第一个合法的未导出调用目标。
+// 不依赖固定字节模式，适用于 Win8.1/Win10/Win11 各版本。
 //
 
 typedef NTSTATUS(__fastcall* PFN_PSP_TERMINATE_THREAD)(
@@ -82,6 +83,52 @@ static PVOID SearchPattern(
     return nullptr;
 }
 
+// 检查地址是否为已知导出函数（排除用）
+static BOOLEAN IsKnownExport(_In_ PVOID Address)
+{
+    static const WCHAR* s_Exports[] = {
+        L"PsGetCurrentThread",
+        L"KeGetCurrentThread",
+        L"PsGetCurrentProcess",
+        L"ExRaiseStatus",
+    };
+    for (ULONG i = 0; i < ARRAYSIZE(s_Exports); i++) {
+        UNICODE_STRING name;
+        RtlInitUnicodeString(&name, s_Exports[i]);
+        PVOID addr = MmGetSystemRoutineAddress(&name);
+        if (addr && addr == Address) return TRUE;
+    }
+    return FALSE;
+}
+
+// 检查目标地址是否像一个合法的函数入口
+static BOOLEAN LooksLikeFunctionPrologue(_In_ PVOID Address)
+{
+    __try {
+        PUCHAR p = (PUCHAR)Address;
+        // int 3 padding 不是函数
+        if (p[0] == 0xCC) return FALSE;
+        // 常见 x64 prologue: sub rsp / push rbx / push rbp / mov [rsp+...] 等
+        // 48 83 EC = sub rsp, imm8
+        // 48 89 5C = mov [rsp+xx], rbx (home register)
+        // 48 89 4C = mov [rsp+xx], rcx
+        // 40 53    = push rbx (REX)
+        // 40 55    = push rbp (REX)
+        // 55       = push rbp
+        // 53       = push rbx
+        if (p[0] == 0x48 && p[1] == 0x83 && p[2] == 0xEC) return TRUE;
+        if (p[0] == 0x48 && p[1] == 0x89)                  return TRUE;
+        if (p[0] == 0x48 && p[1] == 0x8B)                  return TRUE;
+        if (p[0] == 0x4C && p[1] == 0x8B)                  return TRUE;
+        if (p[0] == 0x40 && (p[1] == 0x53 || p[1] == 0x55 || p[1] == 0x56 || p[1] == 0x57))
+            return TRUE;
+        if (p[0] == 0x55 || p[0] == 0x53) return TRUE;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return FALSE;
+    }
+    return FALSE;
+}
+
 VOID ResolvePspTerminateThread()
 {
     g_PspTerminateThread = nullptr;
@@ -96,52 +143,41 @@ VOID ResolvePspTerminateThread()
 
     DbgPrint("[OpenSysKit] [Resolve] PsTerminateSystemThread=%p\n", pBase);
 
-    PVOID pEnd = (PVOID)((PUCHAR)pBase + 0xFF);
-    PVOID pRelOffset = nullptr;
+    // 遍历函数体内所有 E8 (call rel32) 和 E9 (jmp rel32)，
+    // 对每个目标做验证：排除已知导出函数，检查是否为合法函数入口。
+    // 这样不依赖任何固定的上下文字节模式，理论上适用于所有 x64 Windows 版本。
+    PUCHAR pScan = (PUCHAR)pBase;
+    PUCHAR pLimit = pScan + 0xFF;
 
-    // Win11 26100+: PsTerminateSystemThread 有完整 stack frame，
-    // 通过 "mov r8b, 1; call PspTerminateThreadByPointer" (41 B0 01 E8) 调用。
-    // 必须优先匹配此模式，因为函数后部存在不相关的 E9 会导致误匹配。
-    UCHAR patternWin11[] = { 0x41, 0xB0, 0x01, 0xE8 };
-    PVOID pWin11 = SearchPattern(pBase, pEnd, patternWin11, sizeof(patternWin11));
-    if (pWin11) {
-        DbgPrint("[OpenSysKit] [Resolve] Win11 pattern (41 B0 01 E8) matched\n");
-        pRelOffset = pWin11;
-    }
+    for (; pScan < pLimit; pScan++) {
+        if (*pScan != 0xE8 && *pScan != 0xE9) continue;
+        // 0xCC 0xE8 大概率是 padding + 下一个函数的开头碰巧以 E8 开始，跳过
+        if (pScan > (PUCHAR)pBase && *(pScan - 1) == 0xCC) continue;
 
-    // Win10/Win8.1: PsTerminateSystemThread 开头直接 E9 jmp PspTerminateThreadByPointer
-    if (!pRelOffset) {
-        PUCHAR pFirstByte = (PUCHAR)pBase;
-        // 在前 16 字节内找 E9，避免匹配函数体深处不相关的 jmp
-        for (PUCHAR p = pFirstByte; p < pFirstByte + 16 && p < (PUCHAR)pEnd; p++) {
-            if (*p == 0xE9) {
-                pRelOffset = (PVOID)(p + 1);
-                DbgPrint("[OpenSysKit] [Resolve] Win10 pattern (E9 at +%d) matched\n",
-                    (int)(p - pFirstByte));
-                break;
-            }
+        LONG  rel  = *(PLONG)(pScan + 1);
+        PVOID target = (PVOID)(pScan + 5 + rel);
+
+        DbgPrint("[OpenSysKit] [Resolve] +0x%X: %s rel32 -> %p\n",
+            (ULONG)(pScan - (PUCHAR)pBase),
+            (*pScan == 0xE8) ? "call" : "jmp",
+            target);
+
+        if (IsKnownExport(target)) {
+            DbgPrint("[OpenSysKit] [Resolve]   -> known export, skip\n");
+            continue;
         }
-    }
 
-    // 通用回退：在整个范围内搜索 E8（call）
-    if (!pRelOffset) {
-        UCHAR patternE8 = 0xE8;
-        pRelOffset = SearchPattern(pBase, pEnd, &patternE8, 1);
-        if (pRelOffset) {
-            DbgPrint("[OpenSysKit] [Resolve] fallback E8 matched\n");
+        if (!LooksLikeFunctionPrologue(target)) {
+            DbgPrint("[OpenSysKit] [Resolve]   -> not a valid prologue, skip\n");
+            continue;
         }
-    }
 
-    if (!pRelOffset) {
-        DbgPrint("[OpenSysKit] [Resolve] no pattern matched in PsTerminateSystemThread\n");
+        DbgPrint("[OpenSysKit] [Resolve] PspTerminateThreadByPointer=%p\n", target);
+        g_PspTerminateThread = (PFN_PSP_TERMINATE_THREAD)target;
         return;
     }
 
-    LONG  lOffset = *(PLONG)pRelOffset;
-    PVOID pTarget = (PVOID)((PUCHAR)pRelOffset + sizeof(LONG) + lOffset);
-
-    DbgPrint("[OpenSysKit] [Resolve] PspTerminateThreadByPointer=%p\n", pTarget);
-    g_PspTerminateThread = (PFN_PSP_TERMINATE_THREAD)pTarget;
+    DbgPrint("[OpenSysKit] [Resolve] failed: no valid target found\n");
 }
 
 // ========== 系统进程信息结构 ==========

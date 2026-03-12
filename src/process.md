@@ -16,7 +16,7 @@ Win10 上 `PsTerminateSystemThread` 就一条指令，开头直接 `jmp`：
 E9 xx xx xx xx    ; jmp PspTerminateThreadByPointer
 ```
 
-所以搜一个 `E9` 就完事了，没什么好说的。
+搜一个 `E9` 就完事了。
 
 ## Win11 出了什么问题
 
@@ -37,7 +37,7 @@ E9 xx xx xx xx    ; jmp PspTerminateThreadByPointer
 +2B: EB F0              jmp  short (回去 ret)
 ```
 
-问题就在于：旧代码先搜 `E9`，搜 0xFF 范围。Win11 上函数头附近根本没有 `E9`，但偏移 `0xA6` 的地方有一个完全不相关的 `E9`（跳到别的函数去了），被误匹配了。
+旧代码先搜 `E9`，搜 0xFF 范围。Win11 上函数头附近根本没有 `E9`，但偏移 `0xA6` 的地方有一个完全不相关的 `E9`（跳到别的函数去了），被误匹配了。
 
 手动扫了一遍 0xFF 范围内所有 E9/E8：
 
@@ -48,17 +48,25 @@ E9 xx xx xx xx    ; jmp PspTerminateThreadByPointer
 偏移 0xA6: E9 → 不相关的 jmp                      ✗ 旧代码匹配到了这个
 ```
 
-## 怎么修的
+## 最终方案：不再依赖固定字节模式
 
-改成三级匹配：
+一开始的修法是搜 `41 B0 01 E8`（Win11 特有的 `mov r8b, 1; call` 组合），但这个模式不保证以后每个版本都长这样——编译器换个心情可能就变了。
 
-1. 先搜 `41 B0 01 E8`（`mov r8b, 1` + `call`），这是 Win11 上调用 psp 前的固定搭配，4 字节够长不会撞
-2. 没匹配到就在前 16 字节找 `E9`，给 Win10 用（限制范围，不会匹配到后面那个野 E9）
-3. 都没有就全范围搜 `E8` 兜底
+后来换了个思路：既然 `PsTerminateSystemThread` 是个很小的 wrapper，里面调用的第一个"有效的未导出函数"就是 `PspTerminateThreadByPointer`，那就不搜固定模式了，改成：
+
+1. 遍历函数体 0xFF 范围内所有 `E8`/`E9` 指令
+2. 算出每个 call/jmp 的目标地址
+3. 跳过已知导出函数（`PsGetCurrentThread` 之类的，用 `MmGetSystemRoutineAddress` 排除）
+4. 检查目标地址是不是一个合法的函数入口（看 prologue 字节，`48 89 xx`/`48 83 EC`/`push rbx` 等常见开头）
+5. 第一个通过验证的就是目标
+
+在 Win11 26200 上验证：第一个 `E8` 在 `+0x26`，目标 prologue 是 `48 89 5C 24 08`（`mov [rsp+8], rbx`），直接命中。中间不需要知道 `41 B0 01` 之类的上下文。
+
+这个方案的好处是不依赖任何版本特定的字节序列，只要微软不把 `PsTerminateSystemThread` 改成完全不调用 `PspTerminateThreadByPointer`（那它就没法终止线程了），逻辑就能工作。
 
 ## 怎么离线逆向的
 
-没开内核调试，纯离线分析 ntoskrnl.exe：
+没开内核调试，纯离线分析 ntoskrnl.exe。
 
 **1) 拿函数 RVA**
 
@@ -69,31 +77,25 @@ dumpbin /exports C:\Windows\System32\ntoskrnl.exe | findstr PsTerminateSystemThr
 
 **2) RVA 转文件偏移**
 
-```
-dumpbin /headers ntoskrnl.exe
-```
-
-找 .text section：VA=0x1000, FileOffset=0x600
+ntoskrnl 的 section layout 比较特殊（36 个 section，`.text` 的 VA 不是常见的 `0x1000`），得用 `dumpbin /headers` 看清楚：
 
 ```
-文件偏移 = 0x9D8000 - 0x1000 + 0x600 = 0x9D7600
+PAGE section: VA=0x6F5000, RawPtr=0x66E000
 ```
 
-（注：实际跑的时候发现 dumpbin 输出的 section 信息和预期有偏差，最终用 `0x951000` 作为文件偏移才对上，可能是 ntoskrnl 的 section alignment 比较特殊，建议以实际 hexdump 对照为准。）
+RVA `0x9D8000` 落在 PAGE section：
+
+```
+文件偏移 = 0x9D8000 - 0x6F5000 + 0x66E000 = 0x951000
+```
 
 **3) PowerShell 读字节**
 
 ```powershell
 $bytes = [IO.File]::ReadAllBytes("C:\Windows\System32\ntoskrnl.exe")
-# 从文件偏移处读 48 字节，手动反汇编确认
+# 从文件偏移处读，手动反汇编确认
 ```
 
 **4) 验证目标**
 
-算出 call 的目标 RVA 后，再去读那个地址的字节，看是不是正常的函数 prologue（`sub rsp, xx` 之类的），确认没算错。
-
-## 注意事项
-
-- 不同 Win11 版本的 ntoskrnl 编译产物可能不同，`41 B0 01 E8` 这个模式不保证永远有效，后续大版本更新需要复查
-- Win10 各版本目前都是开头直接 `E9`，比较稳定
-- `SearchPattern` 返回的是 pattern 末尾之后的地址，所以匹配 `41 B0 01 E8` 后 `pRelOffset` 直接指向 rel32 偏移，不需要额外 +1
+算出 call 的目标 RVA 后，再去读那个地址的字节，确认是正常的函数 prologue（`48 89 5C 24 08` = `mov [rsp+8], rbx`），没算错。
