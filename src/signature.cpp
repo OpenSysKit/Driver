@@ -699,22 +699,91 @@ static SIGNATURE_STATUS VerifyPESignatureFromFile(PUNICODE_STRING FilePath)
 // Public API
 // ================================================================
 
+//
+// Process signature cache
+//
+typedef struct _SIGNATURE_CACHE_ENTRY {
+    ULONG ProcessId;
+    LARGE_INTEGER LastVerified;
+    SIGNATURE_STATUS Status;
+} SIGNATURE_CACHE_ENTRY, *PSIGNATURE_CACHE_ENTRY;
+
+#define MAX_SIGNATURE_CACHE_ENTRIES 16
+static SIGNATURE_CACHE_ENTRY g_SignatureCache[MAX_SIGNATURE_CACHE_ENTRIES] = { 0 };
+static KSPIN_LOCK g_SignatureCacheLock;
+static BOOLEAN g_SignatureCacheInitialized = FALSE;
+
+//
+// Verify caller signature with caching
+//
 SIGNATURE_STATUS VerifyCallerSignature(VOID)
 {
+    NTSTATUS status = STATUS_SUCCESS;
+    ULONG currentPid = (ULONG)(ULONG_PTR)PsGetCurrentProcessId();
+    
+    // System process is always trusted
+    if (currentPid == 4) {
+        return SignatureValid;
+    }
+    
+    // Initialize lock if needed
+    if (!g_SignatureCacheInitialized) {
+        KeInitializeSpinLock(&g_SignatureCacheLock);
+        g_SignatureCacheInitialized = TRUE;
+    }
+    
+    // Check cache
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&g_SignatureCacheLock, &oldIrql);
+    for (ULONG i = 0; i < MAX_SIGNATURE_CACHE_ENTRIES; i++) {
+        if (g_SignatureCache[i].ProcessId == currentPid) {
+            SIGNATURE_STATUS cachedStatus = g_SignatureCache[i].Status;
+            KeReleaseSpinLock(&g_SignatureCacheLock, oldIrql);
+            // SigLog("Using cached signature status for PID %u: %d", currentPid, cachedStatus);
+            return cachedStatus;
+        }
+    }
+    KeReleaseSpinLock(&g_SignatureCacheLock, oldIrql);
+    
+    SigLog("Verifying signature for PID %u (not in cache)", currentPid);
+    
     WCHAR pathBuffer[520] = { 0 };
     UNICODE_STRING imagePath = { 0 };
-
+    
     imagePath.Buffer = pathBuffer;
     imagePath.MaximumLength = sizeof(pathBuffer);
     imagePath.Length = 0;
-
-    NTSTATUS status = GetCallerImagePath(&imagePath);
+    
+    status = GetCallerImagePath(&imagePath);
     if (!NT_SUCCESS(status)) {
         SigLog("GetCallerImagePath failed: 0x%08X", status);
         return SignatureError;
     }
-
-    return VerifyFileSignature(&imagePath);
+    
+    SIGNATURE_STATUS sigStatus = VerifyFileSignature(&imagePath);
+    
+    // Update cache
+    KeAcquireSpinLock(&g_SignatureCacheLock, &oldIrql);
+    // Find empty slot or use a slot (simple round-robin would be better, but just use first empty for now)
+    BOOLEAN cached = FALSE;
+    for (ULONG i = 0; i < MAX_SIGNATURE_CACHE_ENTRIES; i++) {
+        if (g_SignatureCache[i].ProcessId == 0) {
+            g_SignatureCache[i].ProcessId = currentPid;
+            KeQuerySystemTime(&g_SignatureCache[i].LastVerified);
+            g_SignatureCache[i].Status = sigStatus;
+            cached = TRUE;
+            break;
+        }
+    }
+    // If full, overwrite slot 0
+    if (!cached) {
+        g_SignatureCache[0].ProcessId = currentPid;
+        KeQuerySystemTime(&g_SignatureCache[0].LastVerified);
+        g_SignatureCache[0].Status = sigStatus;
+    }
+    KeReleaseSpinLock(&g_SignatureCacheLock, oldIrql);
+    
+    return sigStatus;
 }
 
 SIGNATURE_STATUS VerifyFileSignature(PUNICODE_STRING FilePath)
