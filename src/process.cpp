@@ -38,8 +38,8 @@ typedef PETHREAD (NTAPI* PFN_PS_GET_NEXT_PROCESS_THREAD)(
 
 // ========== PspTerminateThreadByPointer 解析 ==========
 //
-// PsTerminateSystemThread 内部以 E9 rel32 跳转到 PspTerminateThreadByPointer，
-// 扫描 0xFF 字节内定位目标地址。
+// Win10:  PsTerminateSystemThread 开头直接 E9 rel32 跳转到 PspTerminateThreadByPointer
+// Win11:  函数有完整 stack frame，通过 41 B0 01 E8 rel32 (mov r8b,1; call) 调用
 //
 
 typedef NTSTATUS(__fastcall* PFN_PSP_TERMINATE_THREAD)(
@@ -97,23 +97,43 @@ VOID ResolvePspTerminateThread()
     DbgPrint("[OpenSysKit] [Resolve] PsTerminateSystemThread=%p\n", pBase);
 
     PVOID pEnd = (PVOID)((PUCHAR)pBase + 0xFF);
+    PVOID pRelOffset = nullptr;
 
-    // 先尝试 E9（jmp），再尝试 E8（call）
-    UCHAR patternE9 = 0xE9;
-    UCHAR patternE8 = 0xE8;
+    // Win11 26100+: PsTerminateSystemThread 有完整 stack frame，
+    // 通过 "mov r8b, 1; call PspTerminateThreadByPointer" (41 B0 01 E8) 调用。
+    // 必须优先匹配此模式，因为函数后部存在不相关的 E9 会导致误匹配。
+    UCHAR patternWin11[] = { 0x41, 0xB0, 0x01, 0xE8 };
+    PVOID pWin11 = SearchPattern(pBase, pEnd, patternWin11, sizeof(patternWin11));
+    if (pWin11) {
+        DbgPrint("[OpenSysKit] [Resolve] Win11 pattern (41 B0 01 E8) matched\n");
+        pRelOffset = pWin11;
+    }
 
-    PVOID pRelOffset = SearchPattern(pBase, pEnd, &patternE9, 1);
-    if (pRelOffset) {
-        DbgPrint("[OpenSysKit] [Resolve] found E9\n");
-    } else {
+    // Win10/Win8.1: PsTerminateSystemThread 开头直接 E9 jmp PspTerminateThreadByPointer
+    if (!pRelOffset) {
+        PUCHAR pFirstByte = (PUCHAR)pBase;
+        // 在前 16 字节内找 E9，避免匹配函数体深处不相关的 jmp
+        for (PUCHAR p = pFirstByte; p < pFirstByte + 16 && p < (PUCHAR)pEnd; p++) {
+            if (*p == 0xE9) {
+                pRelOffset = (PVOID)(p + 1);
+                DbgPrint("[OpenSysKit] [Resolve] Win10 pattern (E9 at +%d) matched\n",
+                    (int)(p - pFirstByte));
+                break;
+            }
+        }
+    }
+
+    // 通用回退：在整个范围内搜索 E8（call）
+    if (!pRelOffset) {
+        UCHAR patternE8 = 0xE8;
         pRelOffset = SearchPattern(pBase, pEnd, &patternE8, 1);
         if (pRelOffset) {
-            DbgPrint("[OpenSysKit] [Resolve] found E8\n");
+            DbgPrint("[OpenSysKit] [Resolve] fallback E8 matched\n");
         }
     }
 
     if (!pRelOffset) {
-        DbgPrint("[OpenSysKit] [Resolve] neither E9 nor E8 found in PsTerminateSystemThread\n");
+        DbgPrint("[OpenSysKit] [Resolve] no pattern matched in PsTerminateSystemThread\n");
         return;
     }
 
