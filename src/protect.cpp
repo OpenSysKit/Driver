@@ -6,18 +6,20 @@
 #endif
 
 #include <ntifs.h>
-#include "driver.h"
+#include "protect.h"
 
 // ========== PPL 相关定义 ==========
 
-typedef union _PS_PROTECTION {
-    UCHAR Level;
-    struct {
-        UCHAR Type   : 3;
-        UCHAR Audit  : 1;
-        UCHAR Signer : 4;
+typedef struct _PS_PROTECTION {
+    union {
+        UCHAR Level;
+        struct {
+            UCHAR Type   : 3;
+            UCHAR Audit  : 1;
+            UCHAR Signer : 4;
+        };
     };
-} PS_PROTECTION;
+} PS_PROTECTION, *PPS_PROTECTION;
 
 #define PsProtectedTypeNone             0
 #define PsProtectedTypeProtectedLight   1
@@ -61,7 +63,8 @@ static NTSTATUS FindProtectionOffset()
 
     PUCHAR base = (PUCHAR)systemProcess;
 
-    for (ULONG offset = 0x302; offset < 0xC00; offset++) {
+    // 扩大扫描范围到 0x1000，覆盖更多 Windows 版本
+    for (ULONG offset = 0x302; offset < 0x1000; offset++) {
         if (base[offset]   != SYSTEM_PROTECTION_LEVEL) continue;
         if (base[offset-2] != SYSTEM_SIGNATURE_LEVEL)  continue;
 
@@ -82,14 +85,27 @@ static PS_PROTECTION ReadProtection(PEPROCESS process)
 {
     PS_PROTECTION prot = { 0 };
     if (g_ProtectionOffset == 0) return prot;
-    prot.Level = *((PUCHAR)process + g_ProtectionOffset);
+    
+    __try {
+        prot.Level = *((PUCHAR)process + g_ProtectionOffset);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        DbgPrint("[OpenSysKit] ReadProtection: 内存访问异常\n");
+        prot.Level = 0;
+    }
     return prot;
 }
 
 static VOID WriteProtection(PEPROCESS process, PS_PROTECTION prot)
 {
     if (g_ProtectionOffset == 0) return;
-    *((PUCHAR)process + g_ProtectionOffset) = prot.Level;
+    
+    __try {
+        *((PUCHAR)process + g_ProtectionOffset) = prot.Level;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        DbgPrint("[OpenSysKit] WriteProtection: 内存访问异常\n");
+    }
 }
 
 // ========== 保护表管理 ==========
@@ -127,6 +143,24 @@ static BOOLEAN RemoveProtectedEntry(ULONG pid, PUCHAR outOriginalLevel)
     return FALSE;
 }
 
+// ========== 保护等级验证 ==========
+
+static BOOLEAN IsValidProtectionLevel(UCHAR level)
+{
+    if (level == 0) return TRUE; // 允许设置为无保护
+    
+    UCHAR type = level & 0x07;   // 低 3 位
+    UCHAR signer = level >> 4;   // 高 4 位
+    
+    // Type 必须为 0, 1, 2
+    if (type > 2) return FALSE;
+    
+    // Signer 必须为 0-8
+    if (signer > 8) return FALSE;
+    
+    return TRUE;
+}
+
 // ========== 公开接口 ==========
 
 NTSTATUS InitProtect()
@@ -134,50 +168,97 @@ NTSTATUS InitProtect()
     return FindProtectionOffset();
 }
 
+// 兼容旧接口：使用默认的 Antimalware-Light 保护
 NTSTATUS ProcessProtect(ULONG ProcessId)
+{
+    return ProcessSetProtectLevel(ProcessId, PPL_LEVEL_ANTIMALWARE);
+}
+
+// 设置指定的保护等级
+NTSTATUS ProcessSetProtectLevel(ULONG ProcessId, UCHAR ProtectionLevel)
 {
     if (g_ProtectionOffset == 0) return STATUS_UNSUCCESSFUL;
     if (ProcessId == 0 || ProcessId == 4) return STATUS_ACCESS_DENIED;
 
+    // 在获取锁之前先查找进程
     PEPROCESS process = nullptr;
     NTSTATUS status = PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)ProcessId, &process);
     if (!NT_SUCCESS(status)) return status;
 
+    // 0 视为取消保护（恢复原始值）
+    if (ProtectionLevel == 0) {
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&g_DriverContext.ProtectLock, &oldIrql);
+
+        UCHAR originalLevel = 0;
+        BOOLEAN found = RemoveProtectedEntry(ProcessId, &originalLevel);
+
+        KeReleaseSpinLock(&g_DriverContext.ProtectLock, oldIrql);
+
+        if (found) {
+            PS_PROTECTION prot = { 0 };
+            prot.Level = originalLevel;
+            WriteProtection(process, prot);
+            DbgPrint("[OpenSysKit] ProcessSetProtectLevel PID=%lu: restore 0x%02X\n", ProcessId, originalLevel);
+            status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_NOT_FOUND;
+        }
+
+        ObDereferenceObject(process);
+        return status;
+    }
+
+    // 验证保护等级的合法性
+    if (!IsValidProtectionLevel(ProtectionLevel)) {
+        DbgPrint("[OpenSysKit] ProcessSetProtectLevel: 无效的保护等级 0x%02X\n", ProtectionLevel);
+        ObDereferenceObject(process);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // 读取原始保护级别（在锁外进行）
+    PS_PROTECTION original = ReadProtection(process);
+
     KIRQL oldIrql;
     KeAcquireSpinLock(&g_DriverContext.ProtectLock, &oldIrql);
 
-    // 已保护则幂等返回
+    // 检查是否已保护
+    BOOLEAN alreadyProtected = FALSE;
     for (ULONG i = 0; i < g_DriverContext.ProtectedPidCount; i++) {
         if (g_DriverContext.ProtectedPids[i] == ProcessId) {
-            KeReleaseSpinLock(&g_DriverContext.ProtectLock, oldIrql);
-            ObDereferenceObject(process);
-            return STATUS_SUCCESS;
+            alreadyProtected = TRUE;
+            break;
         }
     }
 
-    // 先加入保护表，确认有位置后再写 PPL，
-    // 防止写了 PPL 却因表满无法记录导致无法恢复
-    PS_PROTECTION original = ReadProtection(process);
-    status = AddProtectedEntry(ProcessId, original.Level);
-    if (NT_SUCCESS(status)) {
-        PS_PROTECTION ppl = { 0 };
-        ppl.Level = PPL_LEVEL_ANTIMALWARE;
-        WriteProtection(process, ppl);
-        DbgPrint("[OpenSysKit] ProcessProtect PID=%lu: 0x%02X -> 0x%02X\n",
-            ProcessId, original.Level, ppl.Level);
-    } else {
-        DbgPrint("[OpenSysKit] ProcessProtect PID=%lu: table full\n", ProcessId);
+    if (!alreadyProtected) {
+        // 首次保护，加入保护表
+        status = AddProtectedEntry(ProcessId, original.Level);
+        if (!NT_SUCCESS(status)) {
+            DbgPrint("[OpenSysKit] ProcessSetProtectLevel PID=%lu: table full\n", ProcessId);
+            KeReleaseSpinLock(&g_DriverContext.ProtectLock, oldIrql);
+            ObDereferenceObject(process);
+            return status;
+        }
     }
+
+    // 设置新的保护等级
+    PS_PROTECTION ppl = { 0 };
+    ppl.Level = ProtectionLevel;
+    WriteProtection(process, ppl);
+    DbgPrint("[OpenSysKit] ProcessSetProtectLevel PID=%lu: 0x%02X -> 0x%02X\n",
+        ProcessId, original.Level, ppl.Level);
 
     KeReleaseSpinLock(&g_DriverContext.ProtectLock, oldIrql);
     ObDereferenceObject(process);
-    return status;
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS ProcessUnprotect(ULONG ProcessId)
 {
     if (g_ProtectionOffset == 0) return STATUS_UNSUCCESSFUL;
 
+    // 在获取锁之前先查找进程
     PEPROCESS process = nullptr;
     NTSTATUS status = PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)ProcessId, &process);
     if (!NT_SUCCESS(status)) return status;
@@ -187,6 +268,8 @@ NTSTATUS ProcessUnprotect(ULONG ProcessId)
 
     UCHAR originalLevel = 0;
     BOOLEAN found = RemoveProtectedEntry(ProcessId, &originalLevel);
+
+    KeReleaseSpinLock(&g_DriverContext.ProtectLock, oldIrql);
 
     if (found) {
         PS_PROTECTION prot = { 0 };
@@ -199,7 +282,6 @@ NTSTATUS ProcessUnprotect(ULONG ProcessId)
         status = STATUS_NOT_FOUND;
     }
 
-    KeReleaseSpinLock(&g_DriverContext.ProtectLock, oldIrql);
     ObDereferenceObject(process);
     return status;
 }

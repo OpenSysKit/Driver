@@ -40,6 +40,7 @@
 #define IOCTL_HIDE_PROCESS          CTL_CODE(DEVICE_TYPE_OPENSYSKIT, 0x80C, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_UNHIDE_PROCESS        CTL_CODE(DEVICE_TYPE_OPENSYSKIT, 0x80D, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_INJECT_DLL            CTL_CODE(DEVICE_TYPE_OPENSYSKIT, 0x80E, METHOD_BUFFERED, FILE_ANY_ACCESS)   // 暂时禁用
+#define IOCTL_SET_PROTECT_LEVEL     CTL_CODE(DEVICE_TYPE_OPENSYSKIT, 0x80F, METHOD_BUFFERED, FILE_ANY_ACCESS)   // 设置进程保护等级
 
 // 文件
 #define IOCTL_DELETE_FILE           CTL_CODE(DEVICE_TYPE_OPENSYSKIT, 0x810, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -72,6 +73,21 @@
 typedef struct _PROCESS_REQUEST {
     ULONG ProcessId;
 } PROCESS_REQUEST, *PPROCESS_REQUEST;
+
+// PPL 保护等级设置请求
+// Level 字段使用 PS_PROTECTION.Level 格式：(Signer << 4) | Type
+// 支持的保护等级：
+//   0x00 - 无保护 (None)
+//   0x11 - Authenticode-Light
+//   0x31 - Antimalware-Light (推荐)
+//   0x41 - LSA-Light
+//   0x51 - Windows-Light
+//   0x61 - WinTcb-Light
+typedef struct _PROCESS_PROTECT_REQUEST {
+    ULONG ProcessId;
+    UCHAR ProtectionLevel;
+    UCHAR Reserved[3];
+} PROCESS_PROTECT_REQUEST, *PPROCESS_PROTECT_REQUEST;
 
 typedef struct _PROCESS_KILL_RESULT {
     ULONG Version;

@@ -87,6 +87,14 @@ static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         status = ProcessUnprotect(((PPROCESS_REQUEST)inBuf)->ProcessId);
         break;
 
+    case IOCTL_SET_PROTECT_LEVEL:
+        if (inLen < sizeof(PROCESS_PROTECT_REQUEST)) { status = STATUS_BUFFER_TOO_SMALL; break; }
+        {
+            PPROCESS_PROTECT_REQUEST req = (PPROCESS_PROTECT_REQUEST)inBuf;
+            status = ProcessSetProtectLevel(req->ProcessId, req->ProtectionLevel);
+        }
+        break;
+
     case IOCTL_ELEVATE_PROCESS:
         if (inLen < sizeof(PROCESS_ELEVATE_REQUEST)) { status = STATUS_BUFFER_TOO_SMALL; break; }
         {

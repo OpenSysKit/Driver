@@ -5,8 +5,11 @@
 // 在 DriverEntry 中调用一次，查找 EPROCESS.Protection 偏移
 NTSTATUS InitProtect();
 
-// 给指定 PID 设置 PPL-Antimalware 保护
+// 给指定 PID 设置 PPL-Antimalware 保护（兼容旧接口）
 NTSTATUS ProcessProtect(ULONG ProcessId);
+
+// 给指定 PID 设置指定的 PPL 保护等级
+NTSTATUS ProcessSetProtectLevel(ULONG ProcessId, UCHAR ProtectionLevel);
 
 // 取消保护，恢复原始 Protection 值
 NTSTATUS ProcessUnprotect(ULONG ProcessId);
