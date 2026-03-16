@@ -15,28 +15,12 @@
 #endif
 
 extern "C" {
-    NTSTATUS NTAPI ZwQueryInformationProcess(
-        HANDLE ProcessHandle,
-        ULONG ProcessInformationClass,
-        PVOID ProcessInformation,
-        ULONG ProcessInformationLength,
-        PULONG ReturnLength
+    NTSTATUS NTAPI SeLocateProcessImageName(
+        _In_ PEPROCESS Process,
+        _Outptr_ PUNICODE_STRING* pImageFileName
     );
-
-    NTSTATUS NTAPI ObOpenObjectByPointer(
-        PVOID Object,
-        ULONG HandleAttributes,
-        PACCESS_STATE PassedAccessState,
-        ACCESS_MASK DesiredAccess,
-        POBJECT_TYPE ObjectType,
-        KPROCESSOR_MODE AccessMode,
-        PHANDLE Handle
-    );
-
-    extern POBJECT_TYPE *PsProcessType;
 }
 
-#define ProcessImageFileName 27
 
 static PVOID SigAllocMem(SIZE_T Size)
 {
@@ -383,53 +367,35 @@ static BOOLEAN ExtractMessageDigest(
 
 NTSTATUS GetCallerImagePath(PUNICODE_STRING ImagePath)
 {
-    NTSTATUS status;
-    HANDLE processHandle = NULL;
-    PEPROCESS process = NULL;
-    PVOID buffer = NULL;
-    ULONG returnLength = 0;
-
-    process = IoGetCurrentProcess();
-    if (!process) return STATUS_UNSUCCESSFUL;
-
-    status = ObOpenObjectByPointer(
-        process, OBJ_KERNEL_HANDLE, NULL, 0x0400,
-        *PsProcessType, KernelMode, &processHandle);
-    if (!NT_SUCCESS(status)) {
-        SigLog("ObOpenObjectByPointer failed: 0x%08X", status);
-        return status;
+    if (!ImagePath || !ImagePath->Buffer || ImagePath->MaximumLength < sizeof(WCHAR)) {
+        return STATUS_INVALID_PARAMETER;
     }
 
-    status = ZwQueryInformationProcess(
-        processHandle, ProcessImageFileName, NULL, 0, &returnLength);
-    if (status != STATUS_INFO_LENGTH_MISMATCH || returnLength == 0) {
-        ZwClose(processHandle);
-        return STATUS_UNSUCCESSFUL;
-    }
+    ImagePath->Length = 0;
+    ImagePath->Buffer[0] = L'\0';
 
-    buffer = SigAllocMem(returnLength);
-    if (!buffer) {
-        ZwClose(processHandle);
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    status = ZwQueryInformationProcess(
-        processHandle, ProcessImageFileName, buffer, returnLength, &returnLength);
-    if (NT_SUCCESS(status)) {
-        PUNICODE_STRING srcPath = (PUNICODE_STRING)buffer;
-        if (ImagePath->MaximumLength >= srcPath->Length + sizeof(WCHAR)) {
-            RtlCopyMemory(ImagePath->Buffer, srcPath->Buffer, srcPath->Length);
-            ImagePath->Length = srcPath->Length;
-            ImagePath->Buffer[ImagePath->Length / sizeof(WCHAR)] = L'\0';
-            SigLog("Caller image path: %wZ", ImagePath);
-        } else {
-            status = STATUS_BUFFER_TOO_SMALL;
+    PUNICODE_STRING processImagePath = NULL;
+    NTSTATUS status = SeLocateProcessImageName(IoGetCurrentProcess(), &processImagePath);
+    if (!NT_SUCCESS(status) || !processImagePath || !processImagePath->Buffer) {
+        SigLog("SeLocateProcessImageName failed: 0x%08X", status);
+        if (processImagePath) {
+            ExFreePool(processImagePath);
         }
+        return !NT_SUCCESS(status) ? status : STATUS_UNSUCCESSFUL;
     }
 
-    SigFreeMem(buffer);
-    ZwClose(processHandle);
-    return status;
+    if (ImagePath->MaximumLength < processImagePath->Length + sizeof(WCHAR)) {
+        ExFreePool(processImagePath);
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlCopyMemory(ImagePath->Buffer, processImagePath->Buffer, processImagePath->Length);
+    ImagePath->Length = processImagePath->Length;
+    ImagePath->Buffer[ImagePath->Length / sizeof(WCHAR)] = L'\0';
+    SigLog("Caller image path: %wZ", ImagePath);
+
+    ExFreePool(processImagePath);
+    return STATUS_SUCCESS;
 }
 
 // ================================================================
